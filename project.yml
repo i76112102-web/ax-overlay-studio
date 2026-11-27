@@ -80,16 +80,21 @@ targets:
           - path: Vendor/lara/lib/libxpf.dylib
           - path: Vendor/lara/lib/libgrabkernel2.dylib
   AXOverlayHandler:
-    type: library
+    type: dynamicLibrary
     platform: iOS
     settings:
-      groups:
-        - common
       base:
         PRODUCT_NAME: AXOverlayHandler
-        MACH_O_TYPE: dylib
+        IPHONEOS_DEPLOYMENT_TARGET: "16.5"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTED_PLATFORMS: "iphoneos"
+        SDKROOT: iphoneos
+        ARCHS: arm64e
+        ONLY_ACTIVE_ARCH: NO
+        ENABLE_BITCODE: NO
+        CLANG_ENABLE_MODULES: YES
+        CLANG_ENABLE_OBJC_ARC: YES
         SKIP_INSTALL: NO
-        PRODUCT_BUNDLE_IDENTIFIER: com.yourteam.axoverlay.handler
         CODE_SIGNING_ALLOWED: NO
         CODE_SIGNING_REQUIRED: NO
     sources:
