@@ -360,6 +360,7 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
     uint64_t selSetSelector  = remote_sel(proc, "setSelector:");
     uint64_t selSetArg       = remote_sel(proc, "setArgument:atIndex:");
     uint64_t selInvokeTarget = remote_sel(proc, "invokeWithTarget:");
+    uint64_t selGetReturn    = remote_sel(proc, "getReturnValue:");
     if (clsNSInvocation == 0) {
         if (error) *error = CrossAppError(CrossAppErrorWindowFailed, @"NSInvocation class=0");
         return NO;
@@ -402,9 +403,30 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
     CGRect bubbleFrame = CGRectMake(300, 140, 60, 60);
     invokeSetter("setFrame:", &bubbleFrame, sizeof(bubbleFrame));
 
-    // 2) step16: 去掉 +[UIColor redColor]。它在 trojan 线程返回 autoreleased 对象，
-    //   触发 objc_retainAutoreleaseReturnValue 消费 fake LR=0x401 → SpringBoard 崩溃 → respring → 锁屏。
-    //   当前先用透明窗口验证 setWindowLevel:/setHidden: 能跑通；颜色后续改走主线程 NSInvocation 取返回值再加回。
+    // step17: 主线程执行返回对象的 selector（如 +redColor），用 getReturnValue: 纯内存拷贝读回，
+    //   彻底绕开 trojan 线程 objc_retainAutoreleaseReturnValue 消费 fake LR=0x401 的崩溃链。
+    uint64_t (^invokeObjectGetter)(const char *, uint64_t) = ^uint64_t(const char *selName, uint64_t target) {
+        uint64_t targetSel = remote_sel(proc, selName);
+        AXStepLog(@"get %s targetSel=%llu", selName, targetSel);
+        if (targetSel == 0) return 0;
+        uint64_t sig = remote_msg(proc, target, selSigFor, targetSel, 0, 0, 0);
+        if (sig == 0) return 0;
+        uint64_t inv = remote_msg(proc, clsNSInvocation, selInvWithSig, sig, 0, 0, 0);
+        if (inv == 0) return 0;
+        remote_msg(proc, inv, selSetSelector, targetSel, 0, 0, 0);
+        // invokeWithTarget: 主线程同步执行 getter，返回对象落在 invocation 的 return buffer。
+        remote_msg(proc, inv, selPerform, selInvokeTarget, target, 1, 0);
+        AXStepLog(@"get %s invoked done", selName);
+        // getReturnValue: 是纯 memcpy，trojan 线程安全，不会触发 objc 返回优化。
+        remote_msg(proc, inv, selGetReturn, proc.trojanMem, 0, 0, 0);
+        uint64_t ret = [proc remoteRead64From:proc.trojanMem];
+        AXStepLog(@"get %s ret=%llu", selName, ret);
+        return ret;
+    };
+
+    // 2) 主线程取 UIColor redColor，设为窗口背景，验证真正可见的跨 App 悬浮。
+    uint64_t redColor = invokeObjectGetter("redColor", clsUIColor);
+    if (redColor != 0) invokeSetter("setBackgroundColor:", &redColor, sizeof(redColor));
 
     // 3) windowLevel = 10000000（AX 实测值），double 走 setArgument 8 字节。
     double level = windowLevel;
