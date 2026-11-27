@@ -19,7 +19,7 @@ static AXColor4 AXMix(AXColor4 a, AXColor4 b, CGFloat t) {
     };
 }
 
-static AXColor4 AXOpacity(AXColor4 c, CGFloat a) {
+AXColor4 AXOpacity(AXColor4 c, CGFloat a) {
     c.a = a;
     return c;
 }
