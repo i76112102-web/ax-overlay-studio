@@ -304,6 +304,9 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
 
 - (BOOL)installLaraSpringBoardOverlayWithWindowLevel:(double)windowLevel error:(NSError **)error {
     RemoteCall *proc = (RemoteCall *)self.laraRemoteCall;
+    // step20: 野生 window 的持久标识。App 重启后 self.remoteBubbleView 归零，
+    // 靠 tag 遍历 SpringBoard.windows 清掉上一轮遗留的球，避免累积多个红球。
+    const uint64_t AX_BALL_TAG = 0x585850; // 'AXP'
     if (proc == nil) {
         if (error) *error = CrossAppError(CrossAppErrorBackendNotReady,
                                           @"RemoteCall 未绑定；先调用 bindLaraRemoteCallForSpringBoardWithError:");
@@ -340,7 +343,7 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
     uint64_t keyWin = remote_msg(proc, app, selKeyWindow, 0, 0, 0, 0);
     uint64_t scene = keyWin ? remote_msg(proc, keyWin, selScene, 0, 0, 0, 0) : 0;
 
-    // 移除旧 window（主线程）。
+    // 旧清理仅处理本实例引用；跨实例遗留 window 由下方 tag 遍历统一清除。
     if (self.remoteBubbleView != 0) {
         uint64_t selRemove = remote_sel(proc, "removeFromSuperview");
         remote_msg(proc, self.remoteBubbleView, selPerform, selRemove, 0, 1, 0);
@@ -422,9 +425,63 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
         return invokeSetterOn(win, selName, argPtr, argSize);
     };
 
+    // step20: 遍历 SpringBoard 的 windows，清掉上一轮遗留的 AXP tag window。
+    // 用 getter 取 app.windows（NSArray），count/objectAtIndex 遍历，tag 比对后主线程 setHidden:YES。
+    uint64_t selWindows = remote_sel(proc, "windows");
+    uint64_t selCount = remote_sel(proc, "count");
+    uint64_t selObjAt = remote_sel(proc, "objectAtIndex:");
+    uint64_t selTag = remote_sel(proc, "tag");
+    uint64_t selSetHidden = remote_sel(proc, "setHidden:");
+    uint64_t selWindowLevel = remote_sel(proc, "windowLevel");
+    // 用 NSInvocation getter 取 windows 数组（返回对象，主线程执行）。
+    uint64_t (^getterFor)(uint64_t, const char *) = ^uint64_t(uint64_t target, const char *selName) {
+        uint64_t targetSel = remote_sel(proc, selName);
+        if (targetSel == 0) return 0;
+        uint64_t sig = remote_msg(proc, target, selSigFor, targetSel, 0, 0, 0);
+        if (sig == 0) return 0;
+        uint64_t inv = remote_msg(proc, clsNSInvocation, selInvWithSig, sig, 0, 0, 0);
+        if (inv == 0) return 0;
+        remote_msg(proc, inv, selSetSelector, targetSel, 0, 0, 0);
+        remote_msg(proc, inv, selPerform, selInvokeTarget, target, 1, 0);
+        remote_msg(proc, inv, selGetReturn, proc.trojanMem, 0, 0, 0);
+        return [proc remoteRead64From:proc.trojanMem];
+    };
+    uint64_t appWindows = getterFor(app, "windows");
+    if (appWindows != 0) {
+        uint64_t winCount = remote_msg(proc, appWindows, selCount, 0, 0, 0, 0);
+        AXStepLog(@"cleanup appWindows=%llu count=%llu", appWindows, winCount);
+        for (uint64_t i = 0; i < winCount && i < 64; i++) {
+            uint64_t oldWin = remote_msg(proc, appWindows, selObjAt, i, 0, 0, 0);
+            if (oldWin == 0) continue;
+            uint64_t oldTag = remote_msg(proc, oldWin, selTag, 0, 0, 0, 0);
+            // 读 windowLevel（double）：主线程 getter + getReturnValue 纯拷贝读到 trojanMem。
+            double oldLevel = 0;
+            uint64_t lvSig = remote_msg(proc, oldWin, selSigFor, selWindowLevel, 0, 0, 0);
+            if (lvSig != 0) {
+                uint64_t lvInv = remote_msg(proc, clsNSInvocation, selInvWithSig, lvSig, 0, 0, 0);
+                if (lvInv != 0) {
+                    remote_msg(proc, lvInv, selSetSelector, selWindowLevel, 0, 0, 0);
+                    remote_msg(proc, lvInv, selPerform, selInvokeTarget, oldWin, 1, 0);
+                    remote_msg(proc, lvInv, selGetReturn, proc.trojanMem, 0, 0, 0);
+                    [proc remoteRead:proc.trojanMem to:&oldLevel size:sizeof(oldLevel)];
+                }
+            }
+            // 清掉标记球 或 之前遗留的野生球（level 精确等于我们用的 10000000，避免误伤系统 window）。
+            BOOL levelMatch = (oldLevel > 9999999.0 && oldLevel < 10000001.0);
+            if (oldTag == AX_BALL_TAG || levelMatch) {
+                BOOL hide = YES;
+                invokeSetterOn(oldWin, "setHidden:", &hide, sizeof(hide));
+                AXStepLog(@"cleanup hid old window idx=%llu addr=%llu tag=%llu level=%.1f", i, oldWin, oldTag, oldLevel);
+            }
+        }
+    }
+
     // 1) 悬浮球 frame 60x60，右侧中部吸边。CGRect 走 setArgument 结构体拷贝。
     CGRect bubbleFrame = CGRectMake(320, 280, 60, 60);
     invokeSetter("setFrame:", &bubbleFrame, sizeof(bubbleFrame));
+    // step20: 打持久 tag，供下次 install 遍历清理。
+    uint64_t tagVal = AX_BALL_TAG;
+    invokeSetter("setTag:", &tagVal, sizeof(tagVal));
 
     // step17: 主线程执行返回对象的 selector（如 +redColor），用 getReturnValue: 纯内存拷贝读回，
     //   彻底绕开 trojan 线程 objc_retainAutoreleaseReturnValue 消费 fake LR=0x401 的崩溃链。
