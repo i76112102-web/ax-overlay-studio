@@ -524,6 +524,41 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
         AXStepLog(@"HANDLER end");
     }
 
+    // step25: 不用注入代码，纯 RemoteCall 判定这个野生 window 是否进入触摸 hitTest 链。
+    // 给 window 挂一个 UIPanGestureRecognizer（无需 target/action，UIGestureRecognizer 自身会跟踪 state）。
+    // 之后每 0.5s 读回 recognizer 的 state：0=Possible 1=Began 2=Changed 3=Ended。
+    // 若主机/手指在球上拖动时 state 变为 1/2/3 => hitTest 通；一直 0 => 不在事件链。
+    const char *hitEnv = getenv("AXHITTEST");
+    if (hitEnv != NULL && strcmp(hitEnv, "1") == 0) {
+        AXStepLog(@"HITPROBE begin win=%llu", win);
+        uint64_t clsPan = remote_getClass(proc, "UIPanGestureRecognizer");
+        uint64_t selInit2 = remote_sel(proc, "init");
+        uint64_t selAddGR = remote_sel(proc, "addGestureRecognizer:");
+        uint64_t selState = remote_sel(proc, "state");
+        uint64_t selLocInWin = remote_sel(proc, "locationInView:");
+        AXStepLog(@"HITPROBE clsPan=%llu stateSel=%llu locSel=%llu", clsPan, selState, selLocInWin);
+        uint64_t pan = RemoteArbCall(proc, objc_alloc, clsPan);
+        AXStepLog(@"HITPROBE alloc pan=%llu", pan);
+        if (pan != 0) {
+            remote_msg(proc, pan, selPerform, selInit2, 0, 1, 0);
+            remote_msg(proc, win, selPerform, selAddGR, pan, 1, 0);
+            BOOL interactive = YES;
+            invokeSetter("setUserInteractionEnabled:", &interactive, sizeof(interactive));
+            AXStepLog(@"HITPROBE attached pan=%llu win=%llu", pan, win);
+            self.axHitPan = pan;
+            // 每 0.5s 采样一次 state，共 16 次（8s），覆盖 HID 注入窗口。
+            // 用 main queue 采样，与注入链同线程，避免 RemoteCall trojan 线程竞态。
+            for (int i = 0; i < 16; i++) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * i * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    uint64_t st = remote_msg(proc, pan, selState, 0, 0, 0, 0);
+                    AXStepLog(@"HITPROBE sample[%d] pan=%llu state=%llu", i, pan, st);
+                });
+            }
+        }
+        AXStepLog(@"HITPROBE end");
+    }
+
     return YES;
 }
 

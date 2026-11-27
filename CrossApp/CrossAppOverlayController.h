@@ -54,6 +54,9 @@ typedef struct {
 // 当前球中心坐标（本地缓存），供拖动垫初始化。
 - (CGPoint)currentOverlayCenter;
 
+// step25: hitTest 探针用的 pan recognizer 地址（远程对象）
+@property (nonatomic, assign) uint64_t axHitPan;
+
 // 供调试：返回当前 AX 链符号装配顺序。
 - (NSArray<NSString *> *)callSequence;
 
