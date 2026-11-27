@@ -349,10 +349,53 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
         uint64_t selInit = remote_sel(proc, "init");
         remote_msg(proc, win, selPerform, selInit, 0, 1, 0);
     }
-    // step10: performSelectorOnMainThread 内部对 withObject 调 isBlock/object_getClass，
-    //   BOOL 参数 0/1 被当对象地址 → object_getClass(0x1) 崩溃（SB_crash_223628 铁证）。
-    //   UIWindow 新建默认 hidden=NO / userInteractionEnabled=YES，直接省略即可。
-    //   仅保留参数合法（对象或 nil）的 selector 走 perform。
+    // step11: performSelectorOnMainThread 只能传对象，无法传 double(windowLevel)/CGRect(frame)。
+    //   用 NSInvocation 在 trojan 线程编码标量/结构体参数，invokeWithTarget: 派发到主线程执行，
+    //   目标 setter（setWindowLevel:/setFrame:/setBackgroundColor:）全部落在 SpringBoard 主线程，
+    //   彻底绕开 CA_ASSERT 与 objc_unsafeClaim 消费 fake LR=0x401 的问题。
+    uint64_t clsNSInvocation = remote_getClass(proc, "NSInvocation");
+    uint64_t clsUIColor      = remote_getClass(proc, "UIColor");
+    uint64_t selSigFor       = remote_sel(proc, "methodSignatureForSelector:");
+    uint64_t selInvWithSig   = remote_sel(proc, "invocationWithMethodSignature:");
+    uint64_t selSetSelector  = remote_sel(proc, "setSelector:");
+    uint64_t selSetArg       = remote_sel(proc, "setArgument:atIndex:");
+    uint64_t selInvokeTarget = remote_sel(proc, "invokeWithTarget:");
+    if (clsNSInvocation == 0) {
+        if (error) *error = CrossAppError(CrossAppErrorWindowFailed, @"NSInvocation class=0");
+        return NO;
+    }
+
+    // 辅助：构造 invocation 并主线程 invokeWithTarget:。argPtr/argSize 为 nil/0 表示无参数。
+    // 参数本身是普通指针/整数，setArgument:atIndex: 是纯结构体拷贝，trojan 线程安全。
+    uint64_t (^invokeSetter)(const char *, void *, size_t) = ^uint64_t(const char *selName, void *argPtr, size_t argSize) {
+        uint64_t targetSel = remote_sel(proc, selName);
+        if (targetSel == 0) return 0;
+        uint64_t sig = remote_msg(proc, win, selSigFor, targetSel, 0, 0, 0);
+        if (sig == 0) return 0;
+        uint64_t inv = remote_msg(proc, clsNSInvocation, selInvWithSig, sig, 0, 0, 0);
+        if (inv == 0) return 0;
+        remote_msg(proc, inv, selSetSelector, targetSel, 0, 0, 0);
+        if (argPtr != NULL && argSize > 0) {
+            [proc remote_write:proc.trojanMem from:argPtr size:argSize];
+            remote_msg(proc, inv, selSetArg, proc.trojanMem, 2, 0, 0);
+        }
+        // invokeWithTarget: 单对象参数，主线程执行目标 setter。
+        remote_msg(proc, inv, selPerform, selInvokeTarget, win, 1, 0);
+        return inv;
+    };
+
+    // 1) 小矩形 frame（悬浮球 60x60，右侧中部），CGRect 走 setArgument 结构体拷贝。
+    CGRect bubbleFrame = CGRectMake(300, 140, 60, 60);
+    invokeSetter("setFrame:", &bubbleFrame, sizeof(bubbleFrame));
+
+    // 2) 红色背景（对象参数 UIColor），便于截图确认。
+    uint64_t redColor = remote_msg(proc, clsUIColor, remote_sel(proc, "redColor"), 0, 0, 0, 0);
+    if (redColor != 0) invokeSetter("setBackgroundColor:", &redColor, sizeof(redColor));
+
+    // 3) windowLevel = 10000000（AX 实测值），double 走 setArgument 8 字节。
+    double level = windowLevel;
+    invokeSetter("setWindowLevel:", &level, sizeof(level));
+
     remote_msg(proc, win, selPerform, selMakeVisible, 0, 1, 0);
 
     self.remoteBubbleView = win;
