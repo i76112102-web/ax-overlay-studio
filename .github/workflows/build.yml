@@ -49,7 +49,7 @@ jobs:
             -I AXOverlayHandler \
             -o build/libAXOverlayHandler.dylib \
             AXOverlayHandler/AXOverlayHandler.m \
-            -framework Foundation -framework UIKit
+            -framework Foundation -framework UIKit -framework CoreGraphics
           codesign -f -s - build/libAXOverlayHandler.dylib
           APP=$(find "$DERIVED/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' -print -quit)
           test -n "$APP"
