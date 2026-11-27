@@ -1,0 +1,25 @@
+# Build outputs
+build/
+DerivedData/
+*.xcarchive
+*.ipa
+.build/
+
+# Signing material (never commit)
+*.p12
+*.mobileprovision
+*.p8
+*.cer
+*.key
+signing/
+
+# Xcode generated from project.yml
+AXOverlayStudio.xcodeproj/
+AXOverlayStudio.xcworkspace/
+xcuserdata/
+*.xcuserstate
+
+# OS / editor
+.DS_Store
+*.swp
+*.log
