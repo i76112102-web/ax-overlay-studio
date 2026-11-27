@@ -393,32 +393,32 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
     // step18: 支持指定 target（win / win.layer 等）。
     uint64_t (^invokeSetterOn)(uint64_t, const char *, void *, size_t) = ^uint64_t(uint64_t target, const char *selName, void *argPtr, size_t argSize) {
         uint64_t targetSel = remote_sel(proc, selName);
-        AXStepLog(@"%s targetSel=%llu", [NSString stringWithUTF8String:selName], targetSel);
+        AXStepLog(@"%s targetSel=%llu", selName, targetSel);
         if (targetSel == 0) return 0;
         uint64_t sig = remote_msg(proc, target, selSigFor, targetSel, 0, 0, 0);
-        AXStepLog(@"%s sig=%llu", [NSString stringWithUTF8String:selName], sig);
+        AXStepLog(@"%s sig=%llu", selName, sig);
         if (sig == 0) return 0;
         uint64_t inv = remote_msg(proc, clsNSInvocation, selInvWithSig, sig, 0, 0, 0);
-        AXStepLog(@"%s inv=%llu", [NSString stringWithUTF8String:selName], inv);
+        AXStepLog(@"%s inv=%llu", selName, inv);
         if (inv == 0) return 0;
         remote_msg(proc, inv, selSetSelector, targetSel, 0, 0, 0);
-        AXStepLog(@"%s setSelector done inv=%llu", [NSString stringWithUTF8String:selName], inv);
+        AXStepLog(@"%s setSelector done inv=%llu", selName, inv);
         if (argPtr != NULL && argSize > 0) {
             BOOL wrote = [proc remote_write:proc.trojanMem from:argPtr size:argSize];
             uint64_t check = [proc remoteRead64From:proc.trojanMem];
-            AXStepLog(@"%s wrote=%d argSize=%zu trojanMem=%llu val=%llu", [NSString stringWithUTF8String:selName], wrote, argSize, proc.trojanMem, check);
+            AXStepLog(@"%s wrote=%d argSize=%zu trojanMem=%llu val=%llu", selName, wrote, argSize, proc.trojanMem, check);
             remote_msg(proc, inv, selSetArg, proc.trojanMem, 2, 0, 0);
-            AXStepLog(@"%s setArg done", [NSString stringWithUTF8String:selName]);
+            AXStepLog(@"%s setArg done", selName);
         }
         // invokeWithTarget: 单对象参数，主线程执行目标 setter。
-        AXStepLog(@"%s invoking target=%llu perform=%llu invokeSel=%llu", [NSString stringWithUTF8String:selName], target, selPerform, selInvokeTarget);
+        AXStepLog(@"%s invoking target=%llu perform=%llu invokeSel=%llu", selName, target, selPerform, selInvokeTarget);
         // step16: 恢复同步派发（waitUntilDone=1）。step15 的"死锁"假设是错的：
         //   SpringBoard-2026-11-27-231618.ips 铁证 = setFrame: 之后 trojan 线程上
         //   +[UIColor redColor] 对象返回触发 objc_retainAutoreleaseReturnValue，
         //   消费 fake LR=0x401 → EXC_BAD_ACCESS。不是死锁，是崩溃。
         //   同步派发保证 4 个 setter 顺序执行、可诊断。
         remote_msg(proc, inv, selPerform, selInvokeTarget, target, 1, 0);
-        AXStepLog(@"%s invoked(sync) done", [NSString stringWithUTF8String:selName]);
+        AXStepLog(@"%s invoked(sync) done", selName);
         return inv;
     };
     uint64_t (^invokeSetter)(const char *, void *, size_t) = ^uint64_t(const char *selName, void *argPtr, size_t argSize) {
