@@ -1,5 +1,7 @@
 #import "darksword_api_shim.h"
 #import "darksword.h"
+#import "offsets.h"
+#import "utils.h"
 
 NSString *const DarkSwordShimErrorDomain = @"DarkSwordShimErrorDomain";
 
@@ -49,6 +51,32 @@ NSError *DSError(NSInteger code, NSString *format, ...) {
 
 - (void)bindLaraBackend {
     [self setInitBlock:^BOOL(NSError **error) {
+        // lara 官方启动顺序：init_offsets() -> offsets_init() -> ds_run()。
+        // 直接 ds_run() 会让所有 off_* = 0，PE 阶段按 0 偏移读写内核，必然 panic。
+        // iPhone16,1 / A17 需要 t1sz_boot=0x11，先写默认值再让 loadalloffsets() 载入。
+        NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+        if ([prefs objectForKey:@"lara.t1sz_boot"] == nil) {
+            [prefs setObject:@(0x11) forKey:@"lara.t1sz_boot"];
+            [prefs synchronize];
+        }
+        init_offsets();
+        offsets_init();
+
+        // 防护：关键偏移仍为 0 时拒绝执行，避免用 0 偏移打内核。
+        extern uint32_t off_inpcb_inp_depend6_inp6_icmp6filt;
+        extern uint32_t off_socket_so_usecount;
+        extern uint32_t off_protosw_pr_input;
+        if (off_inpcb_inp_depend6_inp6_icmp6filt == 0 ||
+            off_socket_so_usecount == 0 || off_protosw_pr_input == 0) {
+            if (error) {
+                *error = DSError(DarkSwordShimErrorBackendNotBound,
+                                 @"内核偏移未初始化（icmp6filt=0x%x usecount=0x%x protosw=0x%x），拒绝 ds_run",
+                                 off_inpcb_inp_depend6_inp6_icmp6filt,
+                                 off_socket_so_usecount, off_protosw_pr_input);
+            }
+            return NO;
+        }
+
         ds_set_log_callback(DarkSwordLogTrampoline);
         ds_set_progress_callback(DarkSwordProgressTrampoline);
         int result = ds_run();
