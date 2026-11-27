@@ -26,9 +26,8 @@ typedef struct {
     AXColor4 ink, muted, accent, onAccent, border, hero, heroInk;
 } AXThemePalette;
 
-static inline AXColor4 AXRGBA(int r, int g, int b, int a) {
-    return (AXColor4){r / 255.0, g / 255.0, b / 255.0, a / 255.0};
-}
+// Macro (not a function) so palette tables can use it as a compile-time initializer.
+#define AXRGBA(r, g, b, a) ((AXColor4){ (CGFloat)(r) / 255.0, (CGFloat)(g) / 255.0, (CGFloat)(b) / 255.0, (CGFloat)(a) / 255.0 })
 
 FOUNDATION_EXPORT AXThemePalette AXThemeGet(NSUInteger index);
 FOUNDATION_EXPORT AXThemePalette AXMaterialFromPalette(AXThemePalette palette);
