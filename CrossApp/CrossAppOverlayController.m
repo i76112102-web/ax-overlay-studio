@@ -396,7 +396,13 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
     double level = windowLevel;
     invokeSetter("setWindowLevel:", &level, sizeof(level));
 
-    remote_msg(proc, win, selPerform, selMakeVisible, 0, 1, 0);
+    // step12: makeKeyAndVisible 会抢占 SpringBoard 的 keyWindow，
+    //   触发 SBCoverSheetDisableIdleTimerForGestureInProgress → CoverSheet/锁屏面板
+    //   （22:50:43 syslog 铁证：BiometricEvent value:3 + SleepLockScreen 激活）。
+    //   改用 setHidden:NO 让窗口参与合成显示，但不夺 keyWindow，不会拉下锁屏。
+    //   BOOL 参数经 NSInvocation setArgument: 编码（走方法签名 char 类型），主线程 invoke。
+    BOOL shown = NO;
+    invokeSetter("setHidden:", &shown, sizeof(shown));
 
     self.remoteBubbleView = win;
     self.remoteWindowAddress = win;
