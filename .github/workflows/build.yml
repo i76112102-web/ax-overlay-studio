@@ -40,6 +40,12 @@ jobs:
             clean build
           APP=$(find "$DERIVED/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' -print -quit)
           test -n "$APP"
+          mkdir -p "$APP/Frameworks"
+          cp Vendor/lara/lib/libxpf.dylib "$APP/Frameworks/libxpf.dylib"
+          cp Vendor/lara/lib/libgrabkernel2.dylib "$APP/Frameworks/libgrabkernel2.dylib"
+          codesign -f -s - "$APP/Frameworks/libxpf.dylib" || true
+          codesign -f -s - "$APP/Frameworks/libgrabkernel2.dylib" || true
+          codesign -f -s - "$APP" || true
           mkdir -p build
           python3 scripts/make_unsigned_ipa.py "$APP" "build/AXOverlayStudio_unsigned.ipa"
           shasum -a 256 build/*.ipa > build/SHA256SUMS.txt
