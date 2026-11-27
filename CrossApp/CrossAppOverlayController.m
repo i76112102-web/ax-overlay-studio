@@ -54,6 +54,15 @@ static void *axp_suspended_worker(void *arg) {
 @property (nonatomic, assign) uint64_t remoteWindowAddress;
 @property (nonatomic, strong) id laraRemoteCall;   // RemoteCall 实例，强持有
 @property (nonatomic, assign) uint64_t remoteBubbleView;
+@property (nonatomic, assign) CGPoint bubbleCenter;   // step19: 当前球中心（本地缓存）
+// step19: NSInvocation 复用所需的远程 selector / class 缓存
+@property (nonatomic, assign) uint64_t axSelSigFor;
+@property (nonatomic, assign) uint64_t axSelInvWithSig;
+@property (nonatomic, assign) uint64_t axSelSetSelector;
+@property (nonatomic, assign) uint64_t axSelSetArg;
+@property (nonatomic, assign) uint64_t axSelInvokeTarget;
+@property (nonatomic, assign) uint64_t axSelPerform;
+@property (nonatomic, assign) uint64_t axClsNSInvocation;
 @end
 
 @implementation CrossAppOverlayController
@@ -74,6 +83,7 @@ static void *axp_suspended_worker(void *arg) {
         _vtableBound = NO;
         _remoteWindowAddress = 0;
         _remoteBubbleView = 0;
+        _bubbleCenter = CGPointMake(350, 310);  // step19: 初始中心 = frame(320,280,60,60) 的中心
     }
     return self;
 }
@@ -365,6 +375,14 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
         if (error) *error = CrossAppError(CrossAppErrorWindowFailed, @"NSInvocation class=0");
         return NO;
     }
+    // step19: 缓存到实例变量，供 moveOverlayToPoint: 复用同一套 NSInvocation 机制。
+    self.axSelSigFor = selSigFor;
+    self.axSelInvWithSig = selInvWithSig;
+    self.axSelSetSelector = selSetSelector;
+    self.axSelSetArg = selSetArg;
+    self.axSelInvokeTarget = selInvokeTarget;
+    self.axSelPerform = selPerform;
+    self.axClsNSInvocation = clsNSInvocation;
 
     // 辅助：构造 invocation 并主线程 invokeWithTarget:。argPtr/argSize 为 nil/0 表示无参数。
     // 参数本身是普通指针/整数，setArgument:atIndex: 是纯结构体拷贝，trojan 线程安全。
@@ -490,6 +508,40 @@ static void AXStepLog(NSString *fmt, ...) {
         }
     }
     return [self installLaraSpringBoardOverlayWithWindowLevel:windowLevel error:error];
+}
+
+// step19: 实时移动跨 App 球。复用 install 缓存的 NSInvocation selector，
+// 在 SpringBoard 主线程对 win 执行 setFrame:，规避 trojan 线程 objc 返回优化崩溃。
+- (BOOL)moveOverlayToPoint:(CGPoint)point error:(NSError **)error {
+    RemoteCall *proc = (RemoteCall *)self.laraRemoteCall;
+    uint64_t win = self.remoteWindowAddress;
+    if (proc == nil || win == 0 || self.axClsNSInvocation == 0) {
+        if (error) *error = CrossAppError(CrossAppErrorBackendNotReady,
+                                          @"跨 App 球未安装或 invocation 未缓存");
+        return NO;
+    }
+    // 记录圆心，frame 以 60x60 反推原点；吸边限制在屏幕内。
+    CGFloat size = 60.0;
+    CGFloat originX = MAX(0, MIN(point.x - size/2.0, [UIScreen mainScreen].bounds.size.width - size));
+    CGFloat originY = MAX(0, MIN(point.y - size/2.0, [UIScreen mainScreen].bounds.size.height - size));
+    self.bubbleCenter = CGPointMake(originX + size/2.0, originY + size/2.0);
+    CGRect frame = CGRectMake(originX, originY, size, size);
+
+    uint64_t targetSel = remote_sel(proc, "setFrame:");
+    if (targetSel == 0) return NO;
+    uint64_t sig = remote_msg(proc, win, self.axSelSigFor, targetSel, 0, 0, 0);
+    if (sig == 0) return NO;
+    uint64_t inv = remote_msg(proc, self.axClsNSInvocation, self.axSelInvWithSig, sig, 0, 0, 0);
+    if (inv == 0) return NO;
+    remote_msg(proc, inv, self.axSelSetSelector, targetSel, 0, 0, 0);
+    [proc remote_write:proc.trojanMem from:&frame size:sizeof(frame)];
+    remote_msg(proc, inv, self.axSelSetArg, proc.trojanMem, 2, 0, 0);
+    remote_msg(proc, inv, self.axSelPerform, self.axSelInvokeTarget, win, 1, 0);
+    return YES;
+}
+
+- (CGPoint)currentOverlayCenter {
+    return self.bubbleCenter;
 }
 
 - (BOOL)installCrossAppOverlayViaSyscallChainWithWindowLevel:(double)windowLevel error:(NSError **)error {

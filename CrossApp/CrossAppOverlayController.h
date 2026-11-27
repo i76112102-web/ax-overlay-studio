@@ -47,6 +47,13 @@ typedef struct {
 - (BOOL)installCrossAppOverlayWithWindowLevel:(double)windowLevel error:(NSError **)error;
 - (BOOL)removeCrossAppOverlayWithError:(NSError **)error;
 
+// step19: 实时移动跨 App 悬浮球到屏幕坐标（App 内拖动垫 → kcall setFrame）。
+// 球本身在 SpringBoard 进程，位置更新通过 NSInvocation 主线程 setFrame: 落地。
+- (BOOL)moveOverlayToPoint:(CGPoint)point error:(NSError **)error;
+
+// 当前球中心坐标（本地缓存），供拖动垫初始化。
+- (CGPoint)currentOverlayCenter;
+
 // 供调试：返回当前 AX 链符号装配顺序。
 - (NSArray<NSString *> *)callSequence;
 
