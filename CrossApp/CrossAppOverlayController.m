@@ -301,99 +301,91 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
         return NO;
     }
 
-    // SpringBoard 开启 CA_ASSERT_MAIN_THREAD_TRANSACTIONS：在非主线程创建 UIView 会触发
-    // CoreAnimation abort → respring。实测崩溃栈：
-    //   -[UIView initWithFrame:] → UIViewCommonInitWithFrame → CA::Transaction::ensure_implicit
-    //   → CA_ABORT_ON_NON_MAIN_THREAD_TRANSACTION_PUSH
-    // RemoteCall 默认在 trojan 工作线程执行；doRemoteCallSyncOnMainThread: 把整个 block
-    // 的远程调用切换到 SpringBoard 主线程，UI 构造才安全。
-    __block uint64_t bubble = 0;
-    __block uint64_t window = 0;
-    __block BOOL uiOK = YES;
-    __block NSString *failMsg = nil;
-
-    BOOL onMain = [proc doRemoteCallSyncOnMainThread:^BOOL {
-        uint64_t clsUIApplication = remote_getClass(proc, "UIApplication");
-        uint64_t clsUIView        = remote_getClass(proc, "UIView");
-        uint64_t clsUIColor       = remote_getClass(proc, "UIColor");
-        if (clsUIApplication == 0 || clsUIView == 0 || clsUIColor == 0) {
-            failMsg = @"SpringBoard 内解析 UIApplication/UIView/UIColor 失败";
-            uiOK = NO; return NO;
-        }
-
-        uint64_t selSharedApp = remote_sel(proc, "sharedApplication");
-        uint64_t selKeyWindow = remote_sel(proc, "keyWindow");
-        uint64_t selWindows   = remote_sel(proc, "windows");
-        uint64_t selFirst     = remote_sel(proc, "firstObject");
-        uint64_t selDelegate  = remote_sel(proc, "delegate");
-        uint64_t selWindow    = remote_sel(proc, "window");
-
-        uint64_t app = remote_msg(proc, clsUIApplication, selSharedApp, 0, 0, 0, 0);
-        uint64_t w = 0;
-        if (app != 0) {
-            w = remote_msg(proc, app, selKeyWindow, 0, 0, 0, 0);
-            if (w == 0) {
-                uint64_t windows = remote_msg(proc, app, selWindows, 0, 0, 0, 0);
-                if (windows != 0) w = remote_msg(proc, windows, selFirst, 0, 0, 0, 0);
-            }
-            if (w == 0) {
-                uint64_t delegate = remote_msg(proc, app, selDelegate, 0, 0, 0, 0);
-                if (delegate != 0) w = remote_msg(proc, delegate, selWindow, 0, 0, 0, 0);
-            }
-        }
-        if (w == 0) {
-            failMsg = @"SpringBoard 内未找到可用 keyWindow";
-            uiOK = NO; return NO;
-        }
-
-        // 移除旧悬浮球，避免重复叠加（现在已在主线程，直接 removeFromSuperview）。
-        if (self.remoteBubbleView != 0) {
-            uint64_t selRemove = remote_sel(proc, "removeFromSuperview");
-            remote_msg(proc, self.remoteBubbleView, selRemove, 0, 0, 0, 0);
-            self.remoteBubbleView = 0;
-        }
-
-        // 无参数 init（内部等价 initWithFrame:CGRectZero）。CGRect 参数走浮点寄存器
-        // d0-d3，remote_msg 只设 x0-x7，所以真实 frame 用 remote_setCGRect gadget 设置。
-        uint64_t v = RemoteArbCall(proc, objc_alloc, clsUIView);
-        if (v == 0) { failMsg = @"SpringBoard 内 objc_alloc(UIView) 返回 0"; uiOK = NO; return NO; }
-        uint64_t selInit     = remote_sel(proc, "init");
-        uint64_t selSetFrame = remote_sel(proc, "setFrame:");
-        v = remote_msg(proc, v, selInit, 0, 0, 0, 0);
-        if (v == 0) { failMsg = @"SpringBoard 内 UIView init 返回 0"; uiOK = NO; return NO; }
-
-        remote_setCGRect(proc, v, selSetFrame, CGRectMake(300, 140, 60, 60));
-
-        uint64_t selSetBg      = remote_sel(proc, "setBackgroundColor:");
-        uint64_t selSetHidden  = remote_sel(proc, "setHidden:");
-        uint64_t selSetUserInt = remote_sel(proc, "setUserInteractionEnabled:");
-        uint64_t selAddSubview = remote_sel(proc, "addSubview:");
-        uint64_t selBringFront = remote_sel(proc, "bringSubviewToFront:");
-
-        uint64_t selBlueColor = remote_sel(proc, "blueColor");
-        uint64_t color = remote_msg(proc, clsUIColor, selBlueColor, 0, 0, 0, 0);
-        if (color != 0) remote_msg(proc, v, selSetBg, color, 0, 0, 0);
-        remote_msg(proc, v, selSetHidden, 0, 0, 0, 0);
-        remote_msg(proc, v, selSetUserInt, 1, 0, 0, 0);
-
-        // 已在主线程，直接挂载，无需 performSelectorOnMainThread。
-        remote_msg(proc, w, selAddSubview, v, 0, 0, 0);
-        remote_msg(proc, w, selBringFront, v, 0, 0, 0);
-
-        bubble = v;
-        window = w;
-        return YES;
-    }];
-
-    if (!onMain || !uiOK || bubble == 0) {
+    // 实测：SpringBoard 开启 CA_ASSERT_MAIN_THREAD_TRANSACTIONS。
+    //   - trojan 工作线程直接 UIView init → CA_ASSERT abort → respring（SB_crash_195643）
+    //   - doRemoteCallSyncOnMainThread 的 dispatch_async_and_wait 把 0x401(FAKE_LR_TROJAN)
+    //     当 block retain → 主线程 EXC_BAD_ACCESS → 锁屏（SB_crash_205530）
+    // 正解（lara rc.m::freakyperform 模式）：只把会 push CA 隐式事务的 init/addSubview
+    // 用 performSelectorOnMainThread:withObject:waitUntilDone: 派发到主线程；
+    // setFrame/简单属性在 trojan 线程安全（rc.m:762 move_freaky_dog_overlay 已验证）。
+    uint64_t clsUIApplication = remote_getClass(proc, "UIApplication");
+    uint64_t clsUIView        = remote_getClass(proc, "UIView");
+    uint64_t clsUIColor       = remote_getClass(proc, "UIColor");
+    if (clsUIApplication == 0 || clsUIView == 0 || clsUIColor == 0) {
         if (error) {
-            NSString *detail = failMsg ?: [NSString stringWithFormat:
-                @"主线程 UI 构造失败 onMain=%d uiOK=%d bubble=%llu",
-                onMain, uiOK, (unsigned long long)bubble];
-            *error = CrossAppError(CrossAppErrorWindowFailed, @"%@", detail);
+            *error = CrossAppError(CrossAppErrorWindowFailed,
+                                   @"SpringBoard 内解析 UIApplication/UIView/UIColor 失败");
         }
         return NO;
     }
+
+    uint64_t selSharedApp = remote_sel(proc, "sharedApplication");
+    uint64_t selKeyWindow = remote_sel(proc, "keyWindow");
+    uint64_t selWindows   = remote_sel(proc, "windows");
+    uint64_t selFirst     = remote_sel(proc, "firstObject");
+    uint64_t selDelegate  = remote_sel(proc, "delegate");
+    uint64_t selWindow    = remote_sel(proc, "window");
+
+    uint64_t app = remote_msg(proc, clsUIApplication, selSharedApp, 0, 0, 0, 0);
+    uint64_t window = 0;
+    if (app != 0) {
+        window = remote_msg(proc, app, selKeyWindow, 0, 0, 0, 0);
+        if (window == 0) {
+            uint64_t windows = remote_msg(proc, app, selWindows, 0, 0, 0, 0);
+            if (windows != 0) window = remote_msg(proc, windows, selFirst, 0, 0, 0, 0);
+        }
+        if (window == 0) {
+            uint64_t delegate = remote_msg(proc, app, selDelegate, 0, 0, 0, 0);
+            if (delegate != 0) window = remote_msg(proc, delegate, selWindow, 0, 0, 0, 0);
+        }
+    }
+    if (window == 0) {
+        if (error) {
+            *error = CrossAppError(CrossAppErrorWindowFailed, @"SpringBoard 内未找到可用 keyWindow");
+        }
+        return NO;
+    }
+
+    uint64_t selPerform = remote_sel(proc, "performSelectorOnMainThread:withObject:waitUntilDone:");
+    uint64_t selRemove  = remote_sel(proc, "removeFromSuperview");
+
+    // 移除旧悬浮球（主线程）。
+    if (self.remoteBubbleView != 0) {
+        remote_msg(proc, self.remoteBubbleView, selPerform, selRemove, 0, 1, 0);
+        self.remoteBubbleView = 0;
+    }
+
+    // alloc 在 trojan 线程安全；init 必须派发到主线程，否则 CA 隐式事务 abort。
+    uint64_t bubble = RemoteArbCall(proc, objc_alloc, clsUIView);
+    if (bubble == 0) {
+        if (error) {
+            *error = CrossAppError(CrossAppErrorWindowFailed, @"SpringBoard 内 objc_alloc(UIView) 返回 0");
+        }
+        return NO;
+    }
+    uint64_t selInit     = remote_sel(proc, "init");
+    uint64_t selSetFrame = remote_sel(proc, "setFrame:");
+    // a2=1 → waitUntilDone=YES，保证 init 完成后再 setFrame/addSubview。
+    remote_msg(proc, bubble, selPerform, selInit, 0, 1, 0);
+
+    // frame 与简单属性在 trojan 线程安全。
+    remote_setCGRect(proc, bubble, selSetFrame, CGRectMake(300, 140, 60, 60));
+
+    uint64_t selSetBg      = remote_sel(proc, "setBackgroundColor:");
+    uint64_t selSetHidden  = remote_sel(proc, "setHidden:");
+    uint64_t selSetUserInt = remote_sel(proc, "setUserInteractionEnabled:");
+    uint64_t selAddSubview = remote_sel(proc, "addSubview:");
+    uint64_t selBringFront = remote_sel(proc, "bringSubviewToFront:");
+
+    uint64_t selBlueColor = remote_sel(proc, "blueColor");
+    uint64_t color = remote_msg(proc, clsUIColor, selBlueColor, 0, 0, 0, 0);
+    if (color != 0) remote_msg(proc, bubble, selSetBg, color, 0, 0, 0);
+    remote_msg(proc, bubble, selSetHidden, 0, 0, 0, 0);
+    remote_msg(proc, bubble, selSetUserInt, 1, 0, 0, 0);
+
+    // addSubview/bringSubview 也派发到主线程（lara freakyperform 已验证）。
+    remote_msg(proc, window, selPerform, selAddSubview, bubble, 1, 0);
+    remote_msg(proc, window, selPerform, selBringFront, bubble, 1, 0);
 
     self.remoteBubbleView = bubble;
     self.remoteWindowAddress = window;
