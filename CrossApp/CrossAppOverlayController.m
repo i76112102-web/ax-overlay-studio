@@ -457,47 +457,6 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
     uint64_t redColor = invokeObjectGetter("redColor", clsUIColor);
     if (redColor != 0) invokeSetter("setBackgroundColor:", &redColor, sizeof(redColor));
 
-    // step22 产品化：把纯红验证球换成半透明玻璃质感球。
-    // +[UIColor colorWithRed:green:blue:alpha:] 需要 4 个 double 参数，
-    // 用扩展的多参数 invocation：每个参数写进 trojanMem 的独立槽 (i*0x100)，
-    // setArgument:atIndex:(2+i)，主线程 invokeWithTarget，getReturnValue 读回对象指针。
-    // 参数槽从 trojanMem+0x100 起，返回值写 trojanMem+0，互不覆盖。
-    uint64_t (^invokeObjectMethodMulti)(uint64_t, const char *, const void **, size_t *, NSUInteger) =
-        ^uint64_t(uint64_t target, const char *selName, const void **argPtrs, size_t *argSizes, NSUInteger argCount) {
-            uint64_t mSel = remote_sel(proc, selName);
-            AXStepLog(@"multi %s sel=%llu", selName, mSel);
-            if (mSel == 0) return 0;
-            uint64_t msig = remote_msg(proc, target, selSigFor, mSel, 0, 0, 0);
-            if (msig == 0) return 0;
-            uint64_t minv = remote_msg(proc, clsNSInvocation, selInvWithSig, msig, 0, 0, 0);
-            if (minv == 0) return 0;
-            remote_msg(proc, minv, selSetSelector, mSel, 0, 0, 0);
-            for (NSUInteger i = 0; i < argCount; i++) {
-                uint64_t slot = proc.trojanMem + (i + 1) * 0x100;
-                [proc remote_write:slot from:argPtrs[i] size:argSizes[i]];
-                remote_msg(proc, minv, selSetArg, slot, 2 + i, 0, 0);
-            }
-            // 主线程同步执行返回对象的方法；getReturnValue 纯 memcpy 读回，规避 PAC fake-LR 崩溃。
-            remote_msg(proc, minv, selPerform, selInvokeTarget, target, 1, 0);
-            remote_msg(proc, minv, selGetReturn, proc.trojanMem, 0, 0, 0);
-            uint64_t ret = [proc remoteRead64From:proc.trojanMem];
-            AXStepLog(@"multi %s ret=%llu", selName, ret);
-            return ret;
-        };
-    // Vision Pro 风格玻璃色：青蓝 + 0.78 alpha（透明感），带圆角即成玻璃球。
-    double cr = 0.16, cg = 0.62, cb = 0.92, ca = 0.78;
-    const void *colorArgs[] = {&cr, &cg, &cb, &ca};
-    size_t colorSizes[] = {sizeof(cr), sizeof(cg), sizeof(cb), sizeof(ca)};
-    uint64_t glassColor = invokeObjectMethodMulti(clsUIColor,
-                                                  "colorWithRed:green:blue:alpha:",
-                                                  colorArgs, colorSizes, 4);
-    if (glassColor != 0) {
-        invokeSetter("setBackgroundColor:", &glassColor, sizeof(glassColor));
-        AXStepLog(@"glassColor applied=%llu", glassColor);
-    } else {
-        AXStepLog(@"glassColor failed, keeping redColor=%llu", redColor);
-    }
-
     // step18: 主线程取 win.layer，设 cornerRadius + masksToBounds 把方块切成圆形悬浮球。
     uint64_t winLayer = invokeObjectGetter("layer", win);
     AXStepLog(@"winLayer=%llu", winLayer);
