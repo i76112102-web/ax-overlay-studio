@@ -425,44 +425,6 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
         return invokeSetterOn(win, selName, argPtr, argSize);
     };
 
-    // step20: 遍历 SpringBoard 的 windows，清掉上一轮遗留的 AXP tag window。
-    // 用 getter 取 app.windows（NSArray），count/objectAtIndex 遍历，tag 比对后主线程 setHidden:YES。
-    uint64_t selWindows = remote_sel(proc, "windows");
-    uint64_t selCount = remote_sel(proc, "count");
-    uint64_t selObjAt = remote_sel(proc, "objectAtIndex:");
-    uint64_t selTag = remote_sel(proc, "tag");
-    uint64_t selSetHidden = remote_sel(proc, "setHidden:");
-    // 用 NSInvocation getter 取 windows 数组（返回对象，主线程执行）。
-    uint64_t (^getterFor)(uint64_t, const char *) = ^uint64_t(uint64_t target, const char *selName) {
-        uint64_t targetSel = remote_sel(proc, selName);
-        if (targetSel == 0) return 0;
-        uint64_t sig = remote_msg(proc, target, selSigFor, targetSel, 0, 0, 0);
-        if (sig == 0) return 0;
-        uint64_t inv = remote_msg(proc, clsNSInvocation, selInvWithSig, sig, 0, 0, 0);
-        if (inv == 0) return 0;
-        remote_msg(proc, inv, selSetSelector, targetSel, 0, 0, 0);
-        remote_msg(proc, inv, selPerform, selInvokeTarget, target, 1, 0);
-        remote_msg(proc, inv, selGetReturn, proc.trojanMem, 0, 0, 0);
-        return [proc remoteRead64From:proc.trojanMem];
-    };
-    uint64_t appWindows = getterFor(app, "windows");
-    if (appWindows != 0) {
-        uint64_t winCount = remote_msg(proc, appWindows, selCount, 0, 0, 0, 0);
-        AXStepLog(@"cleanup appWindows=%llu count=%llu", appWindows, winCount);
-        for (uint64_t i = 0; i < winCount && i < 64; i++) {
-            uint64_t oldWin = remote_msg(proc, appWindows, selObjAt, i, 0, 0, 0);
-            if (oldWin == 0) continue;
-            // 只读 tag（普通 objc_msgSend，x0 返回整数，安全）。不对系统 window 执行 getter/setter。
-            uint64_t oldTag = remote_msg(proc, oldWin, selTag, 0, 0, 0, 0);
-            // 仅清带 AXP tag 的球；系统 window 一律不碰。
-            if (oldTag == AX_BALL_TAG) {
-                BOOL hide = YES;
-                invokeSetterOn(oldWin, "setHidden:", &hide, sizeof(hide));
-                AXStepLog(@"cleanup hid old window idx=%llu addr=%llu tag=%llu", i, oldWin, oldTag);
-            }
-        }
-    }
-
     // 1) 悬浮球 frame 60x60，右侧中部吸边。CGRect 走 setArgument 结构体拷贝。
     CGRect bubbleFrame = CGRectMake(320, 280, 60, 60);
     invokeSetter("setFrame:", &bubbleFrame, sizeof(bubbleFrame));
