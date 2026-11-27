@@ -351,9 +351,12 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
         uint64_t selInit = remote_sel(proc, "init");
         remote_msg(proc, win, selPerform, selInit, 0, 1, 0);
     }
-    // 简单属性：void 返回、整数参数，trojan 线程安全。
-    remote_msg(proc, win, selHidden, 0, 0, 0, 0);
-    remote_msg(proc, win, selUserInt, 1, 0, 0, 0);
+    // step9: CA_ASSERT 证明 trojan 线程的 setHidden: 也走 CA::Layer::begin_change 并 abort。
+    // 所有 UI 属性/显示 selector 全部 performSelectorOnMainThread，waitUntilDone=YES。
+    // setHidden:/setUserInteractionEnabled: 参数为整数，perform 的 withObject 传 0/1 指针值即可
+    // （BOOL 在 arm64 走 x2，objc 消息分发会原样传入，NO=0 / YES=1）。
+    remote_msg(proc, win, selPerform, selHidden, 0, 1, 0);
+    remote_msg(proc, win, selPerform, selUserInt, 1, 1, 0);
     // makeKeyAndVisible：无参，主线程执行。
     remote_msg(proc, win, selPerform, selMakeVisible, 0, 1, 0);
 
