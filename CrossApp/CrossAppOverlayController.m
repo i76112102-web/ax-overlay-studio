@@ -320,8 +320,6 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
     uint64_t selPerform     = remote_sel(proc, "performSelectorOnMainThread:withObject:waitUntilDone:");
     uint64_t selInitScene   = remote_sel(proc, "initWithWindowScene:");
     uint64_t selMakeVisible = remote_sel(proc, "makeKeyAndVisible");
-    uint64_t selHidden      = remote_sel(proc, "setHidden:");
-    uint64_t selUserInt     = remote_sel(proc, "setUserInteractionEnabled:");
 
     uint64_t app = remote_msg(proc, clsUIApplication, selSharedApp, 0, 0, 0, 0);
     if (app == 0) {
@@ -351,13 +349,10 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
         uint64_t selInit = remote_sel(proc, "init");
         remote_msg(proc, win, selPerform, selInit, 0, 1, 0);
     }
-    // step9: CA_ASSERT 证明 trojan 线程的 setHidden: 也走 CA::Layer::begin_change 并 abort。
-    // 所有 UI 属性/显示 selector 全部 performSelectorOnMainThread，waitUntilDone=YES。
-    // setHidden:/setUserInteractionEnabled: 参数为整数，perform 的 withObject 传 0/1 指针值即可
-    // （BOOL 在 arm64 走 x2，objc 消息分发会原样传入，NO=0 / YES=1）。
-    remote_msg(proc, win, selPerform, selHidden, 0, 1, 0);
-    remote_msg(proc, win, selPerform, selUserInt, 1, 1, 0);
-    // makeKeyAndVisible：无参，主线程执行。
+    // step10: performSelectorOnMainThread 内部对 withObject 调 isBlock/object_getClass，
+    //   BOOL 参数 0/1 被当对象地址 → object_getClass(0x1) 崩溃（SB_crash_223628 铁证）。
+    //   UIWindow 新建默认 hidden=NO / userInteractionEnabled=YES，直接省略即可。
+    //   仅保留参数合法（对象或 nil）的 selector 走 perform。
     remote_msg(proc, win, selPerform, selMakeVisible, 0, 1, 0);
 
     self.remoteBubbleView = win;
