@@ -9,7 +9,7 @@
 @interface ViewController ()
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UILabel *themeLabel;
-@property (nonatomic, strong) UIButton *initButton;
+@property (nonatomic, strong) UIButton *kernelInitButton;
 @property (nonatomic, strong) UIButton *themeButton;
 @property (nonatomic, strong) UIButton *localFloatButton;
 @property (nonatomic, strong) UIButton *crossAppButton;
@@ -127,10 +127,10 @@
     [self.view addSubview:themeButton];
     self.themeButton = themeButton;
 
-    UIButton *initButton = [Theme visionButtonWithTitle:@"初始化内核"];
-    [initButton addTarget:self action:@selector(initAction) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:initButton];
-    self.initButton = initButton;
+    UIButton *kernelInitButton = [Theme visionButtonWithTitle:@"初始化内核"];
+    [kernelInitButton addTarget:self action:@selector(kernelInitAction) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:kernelInitButton];
+    self.kernelInitButton = kernelInitButton;
 
     UIButton *localButton = [Theme visionButtonWithTitle:@"显示本机悬浮图标"];
     [localButton addTarget:self action:@selector(localFloatAction) forControlEvents:UIControlEventTouchUpInside];
@@ -196,20 +196,20 @@
         [themeButton.trailingAnchor constraintEqualToAnchor:heroCard.trailingAnchor],
         [themeButton.heightAnchor constraintEqualToConstant:44.0 * [Theme scale]],
 
-        [initButton.topAnchor constraintEqualToAnchor:themeButton.bottomAnchor constant:pad],
-        [initButton.leadingAnchor constraintEqualToAnchor:heroCard.leadingAnchor],
-        [initButton.trailingAnchor constraintEqualToAnchor:heroCard.trailingAnchor],
-        [initButton.heightAnchor constraintEqualToConstant:44.0 * [Theme scale]],
+        [kernelInitButton.topAnchor constraintEqualToAnchor:themeButton.bottomAnchor constant:pad],
+        [kernelInitButton.leadingAnchor constraintEqualToAnchor:heroCard.leadingAnchor],
+        [kernelInitButton.trailingAnchor constraintEqualToAnchor:heroCard.trailingAnchor],
+        [kernelInitButton.heightAnchor constraintEqualToConstant:44.0 * [Theme scale]],
 
-        [localButton.topAnchor constraintEqualToAnchor:initButton.bottomAnchor constant:pad],
-        [localButton.leadingAnchor constraintEqualToAnchor:initButton.leadingAnchor],
-        [localButton.trailingAnchor constraintEqualToAnchor:initButton.trailingAnchor],
-        [localButton.heightAnchor constraintEqualToAnchor:initButton.heightAnchor],
+        [localButton.topAnchor constraintEqualToAnchor:kernelInitButton.bottomAnchor constant:pad],
+        [localButton.leadingAnchor constraintEqualToAnchor:kernelInitButton.leadingAnchor],
+        [localButton.trailingAnchor constraintEqualToAnchor:kernelInitButton.trailingAnchor],
+        [localButton.heightAnchor constraintEqualToAnchor:kernelInitButton.heightAnchor],
 
         [crossButton.topAnchor constraintEqualToAnchor:localButton.bottomAnchor constant:pad],
-        [crossButton.leadingAnchor constraintEqualToAnchor:initButton.leadingAnchor],
-        [crossButton.trailingAnchor constraintEqualToAnchor:initButton.trailingAnchor],
-        [crossButton.heightAnchor constraintEqualToAnchor:initButton.heightAnchor]
+        [crossButton.leadingAnchor constraintEqualToAnchor:kernelInitButton.leadingAnchor],
+        [crossButton.trailingAnchor constraintEqualToAnchor:kernelInitButton.trailingAnchor],
+        [crossButton.heightAnchor constraintEqualToAnchor:kernelInitButton.heightAnchor]
     ]];
 }
 
@@ -254,7 +254,7 @@
 
     [self applyShell:self.heroCard palette:p radius:30.0 * [Theme scale]];
     [self applyShell:self.statusCard palette:p radius:22.0 * [Theme scale]];
-    NSArray<UIButton *> *buttons = @[self.themeButton, self.initButton, self.localFloatButton, self.crossAppButton];
+    NSArray<UIButton *> *buttons = @[self.themeButton, self.kernelInitButton, self.localFloatButton, self.crossAppButton];
     for (UIButton *button in buttons) {
         NSMutableArray<CALayer *> *remove = [NSMutableArray array];
         for (CALayer *layer in button.layer.sublayers) {
@@ -301,7 +301,7 @@
     self.statusLabel.text = text;
 }
 
-- (void)initAction {
+- (void)kernelInitAction {
     [self setStatus:@"状态：内核初始化中…"];
     [[KernelBridge sharedBridge] initializeKernelWithCompletion:^(BOOL success, NSString *message) {
         [self setStatus:[NSString stringWithFormat:@"状态：%@\n%@", success ? @"内核就绪" : @"初始化失败", message ?: @""]];
