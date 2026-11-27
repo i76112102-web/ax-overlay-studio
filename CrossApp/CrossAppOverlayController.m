@@ -388,8 +388,13 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
         }
         // invokeWithTarget: 单对象参数，主线程执行目标 setter。
         AXStepLog(@"%s invoking target=%llu perform=%llu invokeSel=%llu", [NSString stringWithUTF8String:selName], win, selPerform, selInvokeTarget);
+        // step16: 恢复同步派发（waitUntilDone=1）。step15 的"死锁"假设是错的：
+        //   SpringBoard-2026-11-27-231618.ips 铁证 = setFrame: 之后 trojan 线程上
+        //   +[UIColor redColor] 对象返回触发 objc_retainAutoreleaseReturnValue，
+        //   消费 fake LR=0x401 → EXC_BAD_ACCESS。不是死锁，是崩溃。
+        //   同步派发保证 4 个 setter 顺序执行、可诊断。
         remote_msg(proc, inv, selPerform, selInvokeTarget, win, 1, 0);
-        AXStepLog(@"%s invoked", [NSString stringWithUTF8String:selName]);
+        AXStepLog(@"%s invoked(sync) done", [NSString stringWithUTF8String:selName]);
         return inv;
     };
 
@@ -397,9 +402,9 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
     CGRect bubbleFrame = CGRectMake(300, 140, 60, 60);
     invokeSetter("setFrame:", &bubbleFrame, sizeof(bubbleFrame));
 
-    // 2) 红色背景（对象参数 UIColor），便于截图确认。
-    uint64_t redColor = remote_msg(proc, clsUIColor, remote_sel(proc, "redColor"), 0, 0, 0, 0);
-    if (redColor != 0) invokeSetter("setBackgroundColor:", &redColor, sizeof(redColor));
+    // 2) step16: 去掉 +[UIColor redColor]。它在 trojan 线程返回 autoreleased 对象，
+    //   触发 objc_retainAutoreleaseReturnValue 消费 fake LR=0x401 → SpringBoard 崩溃 → respring → 锁屏。
+    //   当前先用透明窗口验证 setWindowLevel:/setHidden: 能跑通；颜色后续改走主线程 NSInvocation 取返回值再加回。
 
     // 3) windowLevel = 10000000（AX 实测值），double 走 setArgument 8 字节。
     double level = windowLevel;
