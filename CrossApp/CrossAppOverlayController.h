@@ -33,6 +33,16 @@ typedef struct {
 - (void)bindRemoteVTable:(CrossAppRemoteVTable)vtable context:(nullable void *)context;
 - (BOOL)isRemoteReady;
 
+// 用 lara 的 RemoteCall 连接 SpringBoard（内核就绪后可用）。这是真正落地的跨 App 通道。
+// 内部执行 [[RemoteCall alloc] initWithProcess:@"SpringBoard" useMigFilterBypass:NO]，
+// 并把返回的实例作为 remote context 绑定。失败返回 NO 并写 error。
+- (BOOL)bindLaraRemoteCallForSpringBoardWithError:(NSError **)error;
+
+// 用已绑定的 RemoteCall 在 SpringBoard 内创建跨 App 悬浮视图。
+// 优先创建独立 UIWindow 并 setWindowLevel:；若 SpringBoard 无可用 scene，
+// 则退回挂到 SpringBoard keyWindow（lara rc.m freakywindow 已验证路径）。
+- (BOOL)installLaraSpringBoardOverlayWithWindowLevel:(double)windowLevel error:(NSError **)error;
+
 // 真正建立跨 App 窗口：在 SpringBoard 内 alloc/init UIWindow，设置 level=10000000.0 并 makeKeyAndVisible。
 - (BOOL)installCrossAppOverlayWithWindowLevel:(double)windowLevel error:(NSError **)error;
 - (BOOL)removeCrossAppOverlayWithError:(NSError **)error;

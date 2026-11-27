@@ -333,9 +333,8 @@
                          error.localizedDescription ?: @"未知错误"]];
         return;
     }
-    [[FloatingOverlay sharedOverlay] setCrossAppMode:YES];
-    [[FloatingOverlay sharedOverlay] show];
-    [self setStatus:@"状态：跨 App 序列已提交\n用 syslog 核对 SBWindowManager / windowLevel 打印者"];
+    // 跨 App 视图已在 SpringBoard 进程内创建（remoteBubbleView），不需要再显示本进程浮窗。
+    [self setStatus:@"状态：跨 App 悬浮已提交到 SpringBoard\n切到任意 App 核对；syslog 看 SpringBoard[pid] 窗口打印"];
 }
 
 @end

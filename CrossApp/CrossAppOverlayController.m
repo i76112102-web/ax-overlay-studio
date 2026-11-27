@@ -1,4 +1,6 @@
 #import "CrossAppOverlayController.h"
+#import "RemoteCall.h"
+#import "privateapi.h"
 #import <dlfcn.h>
 #import <pthread.h>
 #import <mach/mach.h>
@@ -44,6 +46,8 @@ static void *axp_suspended_worker(void *arg) {
 @property (nonatomic, assign) void *remoteContext;
 @property (nonatomic, assign) BOOL vtableBound;
 @property (nonatomic, assign) uint64_t remoteWindowAddress;
+@property (nonatomic, strong) id laraRemoteCall;   // RemoteCall 实例，强持有
+@property (nonatomic, assign) uint64_t remoteBubbleView;
 @end
 
 @implementation CrossAppOverlayController
@@ -63,6 +67,7 @@ static void *axp_suspended_worker(void *arg) {
         memset(&_vtable, 0, sizeof(_vtable));
         _vtableBound = NO;
         _remoteWindowAddress = 0;
+        _remoteBubbleView = 0;
     }
     return self;
 }
@@ -214,7 +219,144 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
     return address;
 }
 
+- (BOOL)bindLaraRemoteCallForSpringBoardWithError:(NSError **)error {
+    // 必须在 ds_run() 成功之后调用；RemoteCall 依赖内核 R/W 拿目标 task port。
+    RemoteCall *rc = [[RemoteCall alloc] initWithProcess:@"SpringBoard" useMigFilterBypass:NO];
+    if (rc == nil) {
+        NSString *detail = [RemoteCall lastInitError] ?: @"RemoteCall(SpringBoard) 返回 nil";
+        if (error) {
+            *error = CrossAppError(CrossAppErrorSpringBoardAbsent, @"%@", detail);
+        }
+        return NO;
+    }
+    self.laraRemoteCall = rc;
+    return YES;
+}
+
+- (BOOL)installLaraSpringBoardOverlayWithWindowLevel:(double)windowLevel error:(NSError **)error {
+    RemoteCall *proc = (RemoteCall *)self.laraRemoteCall;
+    if (proc == nil) {
+        if (error) {
+            *error = CrossAppError(CrossAppErrorBackendNotReady,
+                                   @"RemoteCall 未绑定；先调用 bindLaraRemoteCallForSpringBoardWithError:");
+        }
+        return NO;
+    }
+
+    // 参考 lara rc.m::freakywindow：拿到 SpringBoard 自己的 keyWindow，
+    // 把悬浮视图挂进去。这个视图属于 SpringBoard 进程，天然悬浮在所有 App 之上。
+    uint64_t clsUIApplication = remote_getClass(proc, "UIApplication");
+    uint64_t clsUIView        = remote_getClass(proc, "UIView");
+    uint64_t clsUIColor       = remote_getClass(proc, "UIColor");
+    if (clsUIApplication == 0 || clsUIView == 0 || clsUIColor == 0) {
+        if (error) {
+            *error = CrossAppError(CrossAppErrorWindowFailed,
+                                   @"SpringBoard 内解析 UIApplication/UIView/UIColor 失败");
+        }
+        return NO;
+    }
+
+    uint64_t selSharedApp = remote_sel(proc, "sharedApplication");
+    uint64_t selKeyWindow = remote_sel(proc, "keyWindow");
+    uint64_t selWindows   = remote_sel(proc, "windows");
+    uint64_t selFirst     = remote_sel(proc, "firstObject");
+    uint64_t selDelegate  = remote_sel(proc, "delegate");
+    uint64_t selWindow    = remote_sel(proc, "window");
+
+    uint64_t app = remote_msg(proc, clsUIApplication, selSharedApp, 0, 0, 0, 0);
+    uint64_t window = 0;
+    if (app != 0) {
+        window = remote_msg(proc, app, selKeyWindow, 0, 0, 0, 0);
+        if (window == 0) {
+            uint64_t windows = remote_msg(proc, app, selWindows, 0, 0, 0, 0);
+            if (windows != 0) {
+                window = remote_msg(proc, windows, selFirst, 0, 0, 0, 0);
+            }
+        }
+        if (window == 0) {
+            uint64_t delegate = remote_msg(proc, app, selDelegate, 0, 0, 0, 0);
+            if (delegate != 0) {
+                window = remote_msg(proc, delegate, selWindow, 0, 0, 0, 0);
+            }
+        }
+    }
+    if (window == 0) {
+        if (error) {
+            *error = CrossAppError(CrossAppErrorWindowFailed, @"SpringBoard 内未找到可用 keyWindow");
+        }
+        return NO;
+    }
+
+    // 若已挂过，先移除，避免重复叠加。
+    if (self.remoteBubbleView != 0) {
+        uint64_t selRemove = remote_sel(proc, "removeFromSuperview");
+        uint64_t selPerform = remote_sel(proc, "performSelectorOnMainThread:withObject:waitUntilDone:");
+        remote_msg(proc, self.remoteBubbleView, selPerform, selRemove, 0, 1, 0);
+        self.remoteBubbleView = 0;
+    }
+
+    // alloc/init 一个 UIView 作为悬浮球，参考 lara rc.m 的 remote_msg 模式。
+    uint64_t bubble = RemoteArbCall(proc, objc_alloc, clsUIView);
+    if (bubble == 0) {
+        if (error) {
+            *error = CrossAppError(CrossAppErrorWindowFailed, @"SpringBoard 内 objc_alloc(UIView) 返回 0");
+        }
+        return NO;
+    }
+    uint64_t selInitFrame = remote_sel(proc, "initWithFrame:");
+    uint64_t selSetFrame  = remote_sel(proc, "setFrame:");
+
+    // 用 CGRectZero init（remote_msg 只能传整型寄存器，frame 用 setFrame 补）。
+    bubble = remote_msg(proc, bubble, selInitFrame, 0, 0, 0, 0);
+    if (bubble == 0) {
+        if (error) {
+            *error = CrossAppError(CrossAppErrorWindowFailed, @"SpringBoard 内 initWithFrame: 返回 0");
+        }
+        return NO;
+    }
+
+    // 悬浮球尺寸/位置：屏幕右上角区域，60x60 圆形。
+    remote_setCGRect(proc, bubble, selSetFrame, CGRectMake(300, 140, 60, 60));
+
+    uint64_t selSetBg      = remote_sel(proc, "setBackgroundColor:");
+    uint64_t selSetHidden  = remote_sel(proc, "setHidden:");
+    uint64_t selSetUserInt = remote_sel(proc, "setUserInteractionEnabled:");
+    uint64_t selAddSubview = remote_sel(proc, "addSubview:");
+    uint64_t selPerform    = remote_sel(proc, "performSelectorOnMainThread:withObject:waitUntilDone:");
+
+    // UIColor colorWithRed:green:blue:alpha: 需要 double 寄存器，改用系统蓝色常量选择器。
+    uint64_t selBlueColor = remote_sel(proc, "blueColor");
+    uint64_t color = remote_msg(proc, clsUIColor, selBlueColor, 0, 0, 0, 0);
+    if (color != 0) {
+        remote_msg(proc, bubble, selSetBg, color, 0, 0, 0);
+    }
+    remote_msg(proc, bubble, selSetHidden, 0, 0, 0, 0);
+    remote_msg(proc, bubble, selSetUserInt, 1, 0, 0, 0);
+
+    // 在主线程把悬浮球挂到 SpringBoard keyWindow。
+    remote_msg(proc, window, selPerform, selAddSubview, bubble, 1, 0);
+    remote_msg(proc, window, selPerform, remote_sel(proc, "bringSubviewToFront:"), bubble, 1, 0);
+
+    self.remoteBubbleView = bubble;
+    self.remoteWindowAddress = window;
+    return YES;
+}
+
 - (BOOL)installCrossAppOverlayWithWindowLevel:(double)windowLevel error:(NSError **)error {
+    // 首选：lara RemoteCall 直连 SpringBoard（真正落地的跨 App 通道）。
+    if (self.laraRemoteCall == nil) {
+        NSError *bindError = nil;
+        if (![self bindLaraRemoteCallForSpringBoardWithError:&bindError]) {
+            if (error) {
+                *error = bindError;
+            }
+            return NO;
+        }
+    }
+    return [self installLaraSpringBoardOverlayWithWindowLevel:windowLevel error:error];
+}
+
+- (BOOL)installCrossAppOverlayViaSyscallChainWithWindowLevel:(double)windowLevel error:(NSError **)error {
     if (![self probeLocalSuspendedThreadSequenceWithError:error]) {
         return NO;
     }
@@ -339,6 +481,16 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
 }
 
 - (BOOL)removeCrossAppOverlayWithError:(NSError **)error {
+    // lara RemoteCall 路径：在主线程把悬浮球从 SpringBoard window 移除。
+    if (self.laraRemoteCall != nil && self.remoteBubbleView != 0) {
+        RemoteCall *proc = (RemoteCall *)self.laraRemoteCall;
+        uint64_t selRemove = remote_sel(proc, "removeFromSuperview");
+        uint64_t selPerform = remote_sel(proc, "performSelectorOnMainThread:withObject:waitUntilDone:");
+        remote_msg(proc, self.remoteBubbleView, selPerform, selRemove, 0, 1, 0);
+        self.remoteBubbleView = 0;
+        self.remoteWindowAddress = 0;
+        return YES;
+    }
     if (self.remoteWindowAddress == 0) {
         if (error) {
             *error = CrossAppError(CrossAppErrorUnavailable, @"当前没有已安装的跨 App 窗口");
