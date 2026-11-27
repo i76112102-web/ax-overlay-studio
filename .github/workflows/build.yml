@@ -42,6 +42,7 @@ jobs:
             PROVISIONING_PROFILE_SPECIFIER="" \
             clean build
           echo "== build handler dylib =="
+          mkdir -p build
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           xcrun -sdk iphoneos clang -arch arm64e -dynamiclib -fobjc-arc \
             -miphoneos-version-min=16.5 \
