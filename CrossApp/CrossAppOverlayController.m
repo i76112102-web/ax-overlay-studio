@@ -432,7 +432,6 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
     uint64_t selObjAt = remote_sel(proc, "objectAtIndex:");
     uint64_t selTag = remote_sel(proc, "tag");
     uint64_t selSetHidden = remote_sel(proc, "setHidden:");
-    uint64_t selWindowLevel = remote_sel(proc, "windowLevel");
     // 用 NSInvocation getter 取 windows 数组（返回对象，主线程执行）。
     uint64_t (^getterFor)(uint64_t, const char *) = ^uint64_t(uint64_t target, const char *selName) {
         uint64_t targetSel = remote_sel(proc, selName);
@@ -453,25 +452,13 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
         for (uint64_t i = 0; i < winCount && i < 64; i++) {
             uint64_t oldWin = remote_msg(proc, appWindows, selObjAt, i, 0, 0, 0);
             if (oldWin == 0) continue;
+            // 只读 tag（普通 objc_msgSend，x0 返回整数，安全）。不对系统 window 执行 getter/setter。
             uint64_t oldTag = remote_msg(proc, oldWin, selTag, 0, 0, 0, 0);
-            // 读 windowLevel（double）：主线程 getter + getReturnValue 纯拷贝读到 trojanMem。
-            double oldLevel = 0;
-            uint64_t lvSig = remote_msg(proc, oldWin, selSigFor, selWindowLevel, 0, 0, 0);
-            if (lvSig != 0) {
-                uint64_t lvInv = remote_msg(proc, clsNSInvocation, selInvWithSig, lvSig, 0, 0, 0);
-                if (lvInv != 0) {
-                    remote_msg(proc, lvInv, selSetSelector, selWindowLevel, 0, 0, 0);
-                    remote_msg(proc, lvInv, selPerform, selInvokeTarget, oldWin, 1, 0);
-                    remote_msg(proc, lvInv, selGetReturn, proc.trojanMem, 0, 0, 0);
-                    [proc remoteRead:proc.trojanMem to:&oldLevel size:sizeof(oldLevel)];
-                }
-            }
-            // 清掉标记球 或 之前遗留的野生球（level 精确等于我们用的 10000000，避免误伤系统 window）。
-            BOOL levelMatch = (oldLevel > 9999999.0 && oldLevel < 10000001.0);
-            if (oldTag == AX_BALL_TAG || levelMatch) {
+            // 仅清带 AXP tag 的球；系统 window 一律不碰。
+            if (oldTag == AX_BALL_TAG) {
                 BOOL hide = YES;
                 invokeSetterOn(oldWin, "setHidden:", &hide, sizeof(hide));
-                AXStepLog(@"cleanup hid old window idx=%llu addr=%llu tag=%llu level=%.1f", i, oldWin, oldTag, oldLevel);
+                AXStepLog(@"cleanup hid old window idx=%llu addr=%llu tag=%llu", i, oldWin, oldTag);
             }
         }
     }
