@@ -1,6 +1,15 @@
 #import "KernelBridge.h"
 #import "darksword_api_shim.h"
-#import <libproc.h>
+
+/* iOS SDK does not ship libproc.h; these symbols live in libSystem. */
+#ifndef PROC_ALLPIDS
+#define PROC_ALLPIDS 0
+#endif
+#ifndef MAXCOMLEN
+#define MAXCOMLEN 16
+#endif
+extern int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
+extern int proc_name(int pid, void *buffer, int buffersize);
 
 NSString *const DarkSwordBridgeErrorDomain = @"DarkSwordBridgeErrorDomain";
 
