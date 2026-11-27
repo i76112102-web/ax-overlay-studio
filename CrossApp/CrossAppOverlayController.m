@@ -368,11 +368,12 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
 
     // 辅助：构造 invocation 并主线程 invokeWithTarget:。argPtr/argSize 为 nil/0 表示无参数。
     // 参数本身是普通指针/整数，setArgument:atIndex: 是纯结构体拷贝，trojan 线程安全。
-    uint64_t (^invokeSetter)(const char *, void *, size_t) = ^uint64_t(const char *selName, void *argPtr, size_t argSize) {
+    // step18: 支持指定 target（win / win.layer 等）。
+    uint64_t (^invokeSetterOn)(uint64_t, const char *, void *, size_t) = ^uint64_t(uint64_t target, const char *selName, void *argPtr, size_t argSize) {
         uint64_t targetSel = remote_sel(proc, selName);
         AXStepLog(@"%s targetSel=%llu", [NSString stringWithUTF8String:selName], targetSel);
         if (targetSel == 0) return 0;
-        uint64_t sig = remote_msg(proc, win, selSigFor, targetSel, 0, 0, 0);
+        uint64_t sig = remote_msg(proc, target, selSigFor, targetSel, 0, 0, 0);
         AXStepLog(@"%s sig=%llu", [NSString stringWithUTF8String:selName], sig);
         if (sig == 0) return 0;
         uint64_t inv = remote_msg(proc, clsNSInvocation, selInvWithSig, sig, 0, 0, 0);
@@ -388,19 +389,22 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
             AXStepLog(@"%s setArg done", [NSString stringWithUTF8String:selName]);
         }
         // invokeWithTarget: 单对象参数，主线程执行目标 setter。
-        AXStepLog(@"%s invoking target=%llu perform=%llu invokeSel=%llu", [NSString stringWithUTF8String:selName], win, selPerform, selInvokeTarget);
+        AXStepLog(@"%s invoking target=%llu perform=%llu invokeSel=%llu", [NSString stringWithUTF8String:selName], target, selPerform, selInvokeTarget);
         // step16: 恢复同步派发（waitUntilDone=1）。step15 的"死锁"假设是错的：
         //   SpringBoard-2026-11-27-231618.ips 铁证 = setFrame: 之后 trojan 线程上
         //   +[UIColor redColor] 对象返回触发 objc_retainAutoreleaseReturnValue，
         //   消费 fake LR=0x401 → EXC_BAD_ACCESS。不是死锁，是崩溃。
         //   同步派发保证 4 个 setter 顺序执行、可诊断。
-        remote_msg(proc, inv, selPerform, selInvokeTarget, win, 1, 0);
+        remote_msg(proc, inv, selPerform, selInvokeTarget, target, 1, 0);
         AXStepLog(@"%s invoked(sync) done", [NSString stringWithUTF8String:selName]);
         return inv;
     };
+    uint64_t (^invokeSetter)(const char *, void *, size_t) = ^uint64_t(const char *selName, void *argPtr, size_t argSize) {
+        return invokeSetterOn(win, selName, argPtr, argSize);
+    };
 
-    // 1) 小矩形 frame（悬浮球 60x60，右侧中部），CGRect 走 setArgument 结构体拷贝。
-    CGRect bubbleFrame = CGRectMake(300, 140, 60, 60);
+    // 1) 悬浮球 frame 60x60，右侧中部吸边。CGRect 走 setArgument 结构体拷贝。
+    CGRect bubbleFrame = CGRectMake(320, 280, 60, 60);
     invokeSetter("setFrame:", &bubbleFrame, sizeof(bubbleFrame));
 
     // step17: 主线程执行返回对象的 selector（如 +redColor），用 getReturnValue: 纯内存拷贝读回，
@@ -427,6 +431,16 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
     // 2) 主线程取 UIColor redColor，设为窗口背景，验证真正可见的跨 App 悬浮。
     uint64_t redColor = invokeObjectGetter("redColor", clsUIColor);
     if (redColor != 0) invokeSetter("setBackgroundColor:", &redColor, sizeof(redColor));
+
+    // step18: 主线程取 win.layer，设 cornerRadius + masksToBounds 把方块切成圆形悬浮球。
+    uint64_t winLayer = invokeObjectGetter("layer", win);
+    AXStepLog(@"winLayer=%llu", winLayer);
+    if (winLayer != 0) {
+        CGFloat radius = 30.0;
+        invokeSetterOn(winLayer, "setCornerRadius:", &radius, sizeof(radius));
+        BOOL masks = YES;
+        invokeSetterOn(winLayer, "setMasksToBounds:", &masks, sizeof(masks));
+    }
 
     // 3) windowLevel = 10000000（AX 实测值），double 走 setArgument 8 字节。
     double level = windowLevel;
