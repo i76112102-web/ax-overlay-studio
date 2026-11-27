@@ -5,6 +5,9 @@
 #import <pthread.h>
 #import <mach/mach.h>
 #import <string.h>
+#import <sys/sysctl.h>
+#import <stdio.h>
+#import <stdlib.h>
 
 /* iOS SDK does not ship libproc.h; these symbols live in libSystem. */
 #ifndef PROC_ALLPIDS
@@ -15,6 +18,9 @@
 #endif
 extern int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
 extern int proc_name(int pid, void *buffer, int buffersize);
+
+// 用户态 pid 枚举诊断（显示在状态栏）
+char g_axp_pid_diag[256] = {0};
 
 NSString *const CrossAppErrorDomain = @"CrossAppErrorDomain";
 
@@ -220,27 +226,64 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
 }
 
 - (BOOL)bindLaraRemoteCallForSpringBoardWithError:(NSError **)error {
-    // 用户态拿 SpringBoard pid（proc_name），再让 RemoteCall 用 procbypid 内核定位。
-    // 原因：iOS 18.1/A17 上 procbyname 依赖的 p_name 偏移 0x57D 失准，strcmp 永不命中（L1197）。
+    // 用户态拿 SpringBoard pid，三路兜底；自签沙盒下 proc_listpids 可能被限制。
     pid_t sbPid = -1;
+    char nm[64] = {0};
+
+    // 路线 1：proc_listpids + proc_name
     int pids[4096] = {0};
     int pcount = proc_listpids(PROC_ALLPIDS, 0, pids, (int)sizeof(pids));
-    char pname[MAXCOMLEN + 1] = {0};
     for (int i = 0; pcount > 0 && i < pcount; i++) {
         if (pids[i] <= 0) continue;
-        memset(pname, 0, sizeof(pname));
-        if (proc_name(pids[i], pname, sizeof(pname)) <= 0) continue;
-        if (strcmp(pname, "SpringBoard") == 0) { sbPid = (pid_t)pids[i]; break; }
+        memset(nm, 0, sizeof(nm));
+        if (proc_name(pids[i], nm, sizeof(nm)) <= 0) continue;
+        if (strcmp(nm, "SpringBoard") == 0) { sbPid = (pid_t)pids[i]; break; }
     }
-    printf("(crossapp) SpringBoard pid (userspace) = %d\n", sbPid);
+    snprintf(g_axp_pid_diag, sizeof(g_axp_pid_diag), "listpids n=%d sb=%d", pcount, sbPid);
+
+    // 路线 2：sysctl(KERN_PROC_ALL)
+    if (sbPid <= 0) {
+        int mib[3] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL };
+        size_t sz = 0;
+        if (sysctl(mib, 3, NULL, &sz, NULL, 0) == 0 && sz > 0) {
+            struct kinfo_proc *procs = (struct kinfo_proc *)malloc(sz);
+            if (procs) {
+                size_t sz2 = sz;
+                if (sysctl(mib, 3, procs, &sz2, NULL, 0) == 0) {
+                    int cnt = (int)(sz2 / sizeof(struct kinfo_proc));
+                    for (int i = 0; i < cnt; i++) {
+                        memset(nm, 0, sizeof(nm));
+                        proc_name(procs[i].kp_proc.p_pid, nm, sizeof(nm));
+                        if (strcasecmp(nm, "SpringBoard") == 0) { sbPid = procs[i].kp_proc.p_pid; break; }
+                    }
+                }
+                free(procs);
+            }
+        }
+        snprintf(g_axp_pid_diag, sizeof(g_axp_pid_diag), "sysctl sb=%d", sbPid);
+    }
+
+    // 路线 3：直接扫常见 pid 区间（SpringBoard 通常 pid < 500）
+    if (sbPid <= 0) {
+        for (int pid = 1; pid < 1000; pid++) {
+            memset(nm, 0, sizeof(nm));
+            if (proc_name(pid, nm, sizeof(nm)) > 0 && strcmp(nm, "SpringBoard") == 0) {
+                sbPid = pid; break;
+            }
+        }
+        snprintf(g_axp_pid_diag, sizeof(g_axp_pid_diag), "brute sb=%d", sbPid);
+    }
+
+    printf("(crossapp) SpringBoard pid (userspace) = %d [%s]\n", sbPid, g_axp_pid_diag);
     [RemoteCall setTargetPidOverride:(sbPid > 0 ? sbPid : 0)];
 
     // 必须在 ds_run() 成功之后调用；RemoteCall 依赖内核 R/W 拿目标 task port。
     RemoteCall *rc = [[RemoteCall alloc] initWithProcess:@"SpringBoard" useMigFilterBypass:NO];
     if (rc == nil) {
         NSString *detail = [RemoteCall lastInitError] ?: @"RemoteCall(SpringBoard) 返回 nil";
+        NSString *pidInfo = [NSString stringWithUTF8String:g_axp_pid_diag] ?: @"";
         if (error) {
-            *error = CrossAppError(CrossAppErrorSpringBoardAbsent, @"%@", detail);
+            *error = CrossAppError(CrossAppErrorSpringBoardAbsent, @"%@ [%@]", detail, pidInfo);
         }
         return NO;
     }
