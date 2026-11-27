@@ -500,6 +500,30 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
         AXStepLog(@"DLPROBE end");
     }
 
+    // step24: 在 step23 已证实 RemoteArbCall→dlopen 通路可用后，单变量验证自签 handler dylib。
+    // 仅 AXHANDLER=1 触发，沿用已验证窗口和 NSInvocation 链，不改动红球主体逻辑。
+    const char *handlerEnv = getenv("AXHANDLER");
+    if (handlerEnv != NULL && strcmp(handlerEnv, "1") == 0) {
+        AXStepLog(@"HANDLER begin pid=%d win=%llu", proc.pid, win);
+        const char *bundlePath = [[[NSBundle mainBundle] bundlePath] fileSystemRepresentation];
+        NSString *dylibPath = [NSString stringWithFormat:@"%s/Frameworks/libAXOverlayHandler.dylib", bundlePath ?: ""];
+        uint64_t p = remote_alloc_str(proc, dylibPath.fileSystemRepresentation);
+        AXStepLog(@"HANDLER path=%@ remotePath=%llu", dylibPath, p);
+        uint64_t h = RemoteArbCallWithTimeout(15, proc, dlopen, p, (uint64_t)RTLD_NOW);
+        AXStepLog(@"HANDLER dlopen=%llu", h);
+        if (h != 0) {
+            uint64_t probeName = remote_alloc_str(proc, "AXHandlerProbe");
+            uint64_t attachName = remote_alloc_str(proc, "AXHandlerAttach");
+            uint64_t probe = RemoteArbCallWithTimeout(15, proc, dlsym, h, probeName);
+            uint64_t attach = RemoteArbCallWithTimeout(15, proc, dlsym, h, attachName);
+            AXStepLog(@"HANDLER dlsym probe=%llu attach=%llu", probe, attach);
+            if (probe != 0) RemoteArbCallWithTimeout(15, proc, (void *)(uintptr_t)probe, (uint64_t)0x1234);
+            if (attach != 0) RemoteArbCallWithTimeout(15, proc, (void *)(uintptr_t)attach, win);
+            AXStepLog(@"HANDLER attach done");
+        }
+        AXStepLog(@"HANDLER end");
+    }
+
     return YES;
 }
 

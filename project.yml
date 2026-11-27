@@ -79,3 +79,19 @@ targets:
         files:
           - path: Vendor/lara/lib/libxpf.dylib
           - path: Vendor/lara/lib/libgrabkernel2.dylib
+  AXOverlayHandler:
+    type: library
+    platform: iOS
+    settings:
+      groups:
+        - common
+      base:
+        PRODUCT_NAME: AXOverlayHandler
+        MACH_O_TYPE: dylib
+        SKIP_INSTALL: NO
+        PRODUCT_BUNDLE_IDENTIFIER: com.yourteam.axoverlay.handler
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+    sources:
+      - path: AXOverlayHandler
+        type: group
