@@ -1,6 +1,7 @@
 #import "CrossAppOverlayController.h"
 #import "RemoteCall.h"
 #import "privateapi.h"
+#import <UIKit/UIKit.h>
 #import <dlfcn.h>
 #import <pthread.h>
 #import <mach/mach.h>
