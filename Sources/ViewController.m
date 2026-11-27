@@ -389,6 +389,21 @@
     }
     // 跨 App 视图已在 SpringBoard 进程内创建（remoteBubbleView），不需要再显示本进程浮窗。
     [self setStatus:@"状态：跨 App 悬浮已提交到 SpringBoard\n切到任意 App 核对；syslog 看 SpringBoard[pid] 窗口打印"];
+
+    // step19 测试钩子：AXDRAG=1 时延迟模拟一次拖动，验证 kcall moveOverlayToPoint 生效。
+    const char *dragEnv = getenv("AXDRAG");
+    if (dragEnv != NULL && strcmp(dragEnv, "1") == 0) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            NSError *moveError = nil;
+            CGPoint target = CGPointMake(90.0, 720.0);
+            BOOL moved = [[CrossAppOverlayController sharedController] moveOverlayToPoint:target
+                                                                                   error:&moveError];
+            [self setStatus:[NSString stringWithFormat:@"状态：拖动测试 %@\n目标 (%.0f, %.0f) %@",
+                             moved ? @"OK" : @"FAIL", target.x, target.y,
+                             moveError.localizedDescription ?: @""]];
+        });
+    }
 }
 
 // step19: 拖动垫 pan → kcall 实时移动 SpringBoard 悬浮球。
