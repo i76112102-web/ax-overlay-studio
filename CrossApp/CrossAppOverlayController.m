@@ -369,28 +369,28 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
     // 参数本身是普通指针/整数，setArgument:atIndex: 是纯结构体拷贝，trojan 线程安全。
     uint64_t (^invokeSetter)(const char *, void *, size_t) = ^uint64_t(const char *selName, void *argPtr, size_t argSize) {
         uint64_t targetSel = remote_sel(proc, selName);
-        NSLog(@"(axstep) %s targetSel=%llu", selName, targetSel);
+        printf("(axstep) %s targetSel=%llu\n", selName, targetSel); fflush(stdout);
         if (targetSel == 0) return 0;
         uint64_t sig = remote_msg(proc, win, selSigFor, targetSel, 0, 0, 0);
-        NSLog(@"(axstep) %s sig=%llu", selName, sig);
+        printf("(axstep) %s sig=%llu\n", selName, sig); fflush(stdout);
         if (sig == 0) return 0;
         uint64_t inv = remote_msg(proc, clsNSInvocation, selInvWithSig, sig, 0, 0, 0);
-        NSLog(@"(axstep) %s inv=%llu", selName, inv);
+        printf("(axstep) %s inv=%llu\n", selName, inv); fflush(stdout);
         if (inv == 0) return 0;
         remote_msg(proc, inv, selSetSelector, targetSel, 0, 0, 0);
-        NSLog(@"(axstep) %s setSelector done inv=%llu", selName, inv);
+        printf("(axstep) %s setSelector done inv=%llu\n", selName, inv); fflush(stdout);
         if (argPtr != NULL && argSize > 0) {
             BOOL wrote = [proc remote_write:proc.trojanMem from:argPtr size:argSize];
             uint64_t check = [proc remoteRead64From:proc.trojanMem];
-            NSLog(@"(axstep) %s wrote=%d argPtr=%llu size=%zu trojanMem=%llu val=%llu",
-                  selName, wrote, (uint64_t)argPtr, argSize, proc.trojanMem, check);
+            printf("(axstep) %s wrote=%d argPtr=%llu size=%zu trojanMem=%llu val=%llu\n",
+                   selName, wrote, (uint64_t)argPtr, argSize, proc.trojanMem, check); fflush(stdout);
             remote_msg(proc, inv, selSetArg, proc.trojanMem, 2, 0, 0);
-            NSLog(@"(axstep) %s setArg done", selName);
+            printf("(axstep) %s setArg done\n", selName); fflush(stdout);
         }
         // invokeWithTarget: 单对象参数，主线程执行目标 setter。
-        NSLog(@"(axstep) %s invoking target=%llu perform=%llu invokeSel=%llu", selName, win, selPerform, selInvokeTarget);
+        printf("(axstep) %s invoking target=%llu perform=%llu invokeSel=%llu\n", selName, win, selPerform, selInvokeTarget); fflush(stdout);
         remote_msg(proc, inv, selPerform, selInvokeTarget, win, 1, 0);
-        NSLog(@"(axstep) %s invoked", selName);
+        printf("(axstep) %s invoked\n", selName); fflush(stdout);
         return inv;
     };
 
