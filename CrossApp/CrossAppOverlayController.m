@@ -361,14 +361,17 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
         }
         return NO;
     }
-    uint64_t selInitFrame = remote_sel(proc, "initWithFrame:");
-    uint64_t selSetFrame  = remote_sel(proc, "setFrame:");
+    // initWithFrame: 的 CGRect 参数走浮点寄存器 d0-d3，而 remote_msg 只设置
+    // 整型 x0-x7；d0-d3 残留值会让 frame 变成随机值，UIView 初始化返回 nil。
+    // 改用无参数 init（UIKit 内部等价 initWithFrame:CGRectZero），
+    // 随后用 remote_setCGRect 的 CAMetalDrawable gadget 安全设置真实 frame。
+    uint64_t selInit     = remote_sel(proc, "init");
+    uint64_t selSetFrame = remote_sel(proc, "setFrame:");
 
-    // 用 CGRectZero init（remote_msg 只能传整型寄存器，frame 用 setFrame 补）。
-    bubble = remote_msg(proc, bubble, selInitFrame, 0, 0, 0, 0);
+    bubble = remote_msg(proc, bubble, selInit, 0, 0, 0, 0);
     if (bubble == 0) {
         if (error) {
-            *error = CrossAppError(CrossAppErrorWindowFailed, @"SpringBoard 内 initWithFrame: 返回 0");
+            *error = CrossAppError(CrossAppErrorWindowFailed, @"SpringBoard 内 init 返回 0 (alloc ok)");
         }
         return NO;
     }
