@@ -220,6 +220,21 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
 }
 
 - (BOOL)bindLaraRemoteCallForSpringBoardWithError:(NSError **)error {
+    // 用户态拿 SpringBoard pid（proc_name），再让 RemoteCall 用 procbypid 内核定位。
+    // 原因：iOS 18.1/A17 上 procbyname 依赖的 p_name 偏移 0x57D 失准，strcmp 永不命中（L1197）。
+    pid_t sbPid = -1;
+    int pids[4096] = {0};
+    int pcount = proc_listpids(PROC_ALLPIDS, 0, pids, (int)sizeof(pids));
+    char pname[MAXCOMLEN + 1] = {0};
+    for (int i = 0; pcount > 0 && i < pcount; i++) {
+        if (pids[i] <= 0) continue;
+        memset(pname, 0, sizeof(pname));
+        if (proc_name(pids[i], pname, sizeof(pname)) <= 0) continue;
+        if (strcmp(pname, "SpringBoard") == 0) { sbPid = (pid_t)pids[i]; break; }
+    }
+    printf("(crossapp) SpringBoard pid (userspace) = %d\n", sbPid);
+    [RemoteCall setTargetPidOverride:(sbPid > 0 ? sbPid : 0)];
+
     // 必须在 ds_run() 成功之后调用；RemoteCall 依赖内核 R/W 拿目标 task port。
     RemoteCall *rc = [[RemoteCall alloc] initWithProcess:@"SpringBoard" useMigFilterBypass:NO];
     if (rc == nil) {
