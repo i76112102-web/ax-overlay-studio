@@ -31,6 +31,7 @@ typedef struct {
 
 FOUNDATION_EXPORT AXThemePalette AXThemeGet(NSUInteger index);
 FOUNDATION_EXPORT AXThemePalette AXMaterialFromPalette(AXThemePalette palette);
+FOUNDATION_EXPORT AXColor4 AXOpacity(AXColor4 c, CGFloat alpha);
 FOUNDATION_EXPORT UIColor *AXUIColor(AXColor4 c);
 
 // LiquidBody 对角反射公式。
