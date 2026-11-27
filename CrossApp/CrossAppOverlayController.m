@@ -369,28 +369,27 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
     // 参数本身是普通指针/整数，setArgument:atIndex: 是纯结构体拷贝，trojan 线程安全。
     uint64_t (^invokeSetter)(const char *, void *, size_t) = ^uint64_t(const char *selName, void *argPtr, size_t argSize) {
         uint64_t targetSel = remote_sel(proc, selName);
-        printf("(axstep) %s targetSel=%llu\n", selName, targetSel); fflush(stdout);
+        AXStepLog(@"%s targetSel=%llu", [NSString stringWithUTF8String:selName], targetSel);
         if (targetSel == 0) return 0;
         uint64_t sig = remote_msg(proc, win, selSigFor, targetSel, 0, 0, 0);
-        printf("(axstep) %s sig=%llu\n", selName, sig); fflush(stdout);
+        AXStepLog(@"%s sig=%llu", [NSString stringWithUTF8String:selName], sig);
         if (sig == 0) return 0;
         uint64_t inv = remote_msg(proc, clsNSInvocation, selInvWithSig, sig, 0, 0, 0);
-        printf("(axstep) %s inv=%llu\n", selName, inv); fflush(stdout);
+        AXStepLog(@"%s inv=%llu", [NSString stringWithUTF8String:selName], inv);
         if (inv == 0) return 0;
         remote_msg(proc, inv, selSetSelector, targetSel, 0, 0, 0);
-        printf("(axstep) %s setSelector done inv=%llu\n", selName, inv); fflush(stdout);
+        AXStepLog(@"%s setSelector done inv=%llu", [NSString stringWithUTF8String:selName], inv);
         if (argPtr != NULL && argSize > 0) {
             BOOL wrote = [proc remote_write:proc.trojanMem from:argPtr size:argSize];
             uint64_t check = [proc remoteRead64From:proc.trojanMem];
-            printf("(axstep) %s wrote=%d argPtr=%llu size=%zu trojanMem=%llu val=%llu\n",
-                   selName, wrote, (uint64_t)argPtr, argSize, proc.trojanMem, check); fflush(stdout);
+            AXStepLog(@"%s wrote=%d argSize=%zu trojanMem=%llu val=%llu", [NSString stringWithUTF8String:selName], wrote, argSize, proc.trojanMem, check);
             remote_msg(proc, inv, selSetArg, proc.trojanMem, 2, 0, 0);
-            printf("(axstep) %s setArg done\n", selName); fflush(stdout);
+            AXStepLog(@"%s setArg done", [NSString stringWithUTF8String:selName]);
         }
         // invokeWithTarget: 单对象参数，主线程执行目标 setter。
-        printf("(axstep) %s invoking target=%llu perform=%llu invokeSel=%llu\n", selName, win, selPerform, selInvokeTarget); fflush(stdout);
+        AXStepLog(@"%s invoking target=%llu perform=%llu invokeSel=%llu", [NSString stringWithUTF8String:selName], win, selPerform, selInvokeTarget);
         remote_msg(proc, inv, selPerform, selInvokeTarget, win, 1, 0);
-        printf("(axstep) %s invoked\n", selName); fflush(stdout);
+        AXStepLog(@"%s invoked", [NSString stringWithUTF8String:selName]);
         return inv;
     };
 
@@ -417,6 +416,25 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
     self.remoteBubbleView = win;
     self.remoteWindowAddress = win;
     return YES;
+}
+
+// step14: stdout/stderr 不进 syslog，诊断落盘到 Documents/axstep.log，用 pymobiledevice3 拉取。
+static void AXStepLog(NSString *fmt, ...) {
+    va_list args; va_start(args, fmt);
+    NSString *line = [[NSString alloc] initWithFormat:fmt arguments:args];
+    va_end(args);
+    static NSFileHandle *fh = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        NSString *path = [doc stringByAppendingPathComponent:@"axstep.log"];
+        [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
+        fh = [NSFileHandle fileHandleForWritingAtPath:path];
+    });
+    NSString *stamped = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], line];
+    [fh seekToEndOfFile];
+    [fh writeData:[stamped dataUsingEncoding:NSUTF8StringEncoding]];
+    [fh synchronizeFile];
 }
 
 - (BOOL)installCrossAppOverlayWithWindowLevel:(double)windowLevel error:(NSError **)error {
