@@ -5,6 +5,8 @@
 #import "KernelBridge.h"
 #import "CrossAppOverlayController.h"
 #import "darksword_api_shim.h"
+#include <stdlib.h>
+#include <string.h>
 
 @interface ViewController ()
 @property (nonatomic, strong) UILabel *statusLabel;
@@ -39,6 +41,26 @@
                                              selector:@selector(applyTheme)
                                                  name:@"AXThemeDidChangeNotification"
                                                object:nil];
+    // 测试版自动触发：dvt launch --env AXAUTO=1 时，延迟自动执行 内核初始化 → 注入 SpringBoard。
+    // 绕开 AXAccessibilityAudit.perform_press 对自定义 UIButton 不触发 TouchUpInside 的问题。
+    const char *autoEnv = getenv("AXAUTO");
+    if (autoEnv != NULL && strcmp(autoEnv, "1") == 0) {
+        [self performSelector:@selector(autoSequence) withObject:nil afterDelay:2.0];
+    }
+}
+
+- (void)autoSequence {
+    [self setStatus:@"状态：AUTO 内核初始化中…"];
+    [[KernelBridge sharedBridge] initializeKernelWithCompletion:^(BOOL success, NSString *message) {
+        [self setStatus:[NSString stringWithFormat:@"状态：AUTO %@\n%@",
+                         success ? @"内核就绪" : @"初始化失败", message ?: @""]];
+        if (success) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [self crossAppAction];
+            });
+        }
+    }];
 }
 
 - (void)dealloc {
