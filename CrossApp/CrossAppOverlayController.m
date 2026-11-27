@@ -481,6 +481,25 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
 
     self.remoteBubbleView = win;
     self.remoteWindowAddress = win;
+
+    // step23 dlopen 探针（AXDLPROBE=1 触发，单变量，不碰已验证注入链）：
+    // 验证 RemoteArbCall 能否在 SpringBoard 内 dlopen 系统 dylib 并读回 dlerror。
+    // 系统库在 dyld 共享缓存，本地/远程地址一致，不涉及自签 library validation，
+    // 是验证「RemoteCall → dlopen」通路本身是否可用的最小实验。
+    const char *dlEnv = getenv("AXDLPROBE");
+    if (dlEnv != NULL && strcmp(dlEnv, "1") == 0) {
+        AXStepLog(@"DLPROBE begin pid=%d", proc.pid);
+        const char *sysPath = "/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices";
+        uint64_t mem = proc.trojanMem;
+        BOOL wrote = [proc remote_write:mem from:sysPath size:strlen(sysPath) + 1];
+        AXStepLog(@"DLPROBE wrote=%d mem=%llu", wrote, mem);
+        // dlopen 走本地函数指针（共享缓存地址一致），成功返回非 0 句柄。
+        // 用 RTLD_LAZY(1) 最快返回，只验证通路，不做符号解析。
+        uint64_t hSys = RemoteArbCallWithTimeout(15, proc, dlopen, mem, (uint64_t)RTLD_LAZY);
+        AXStepLog(@"DLPROBE dlopen(BBS)=%llu", hSys);
+        AXStepLog(@"DLPROBE end");
+    }
+
     return YES;
 }
 
