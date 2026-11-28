@@ -1,10 +1,14 @@
 #import "CrossAppOverlayController.h"
 #import "RemoteCall.h"
 #import "privateapi.h"
+#import <UIKit/UIKit.h>
 #import <dlfcn.h>
 #import <pthread.h>
 #import <mach/mach.h>
 #import <string.h>
+#import <sys/sysctl.h>
+#import <stdio.h>
+#import <stdlib.h>
 
 /* iOS SDK does not ship libproc.h; these symbols live in libSystem. */
 #ifndef PROC_ALLPIDS
@@ -15,6 +19,9 @@
 #endif
 extern int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
 extern int proc_name(int pid, void *buffer, int buffersize);
+
+// 用户态 pid 枚举诊断（显示在状态栏）
+char g_axp_pid_diag[256] = {0};
 
 NSString *const CrossAppErrorDomain = @"CrossAppErrorDomain";
 
@@ -48,6 +55,15 @@ static void *axp_suspended_worker(void *arg) {
 @property (nonatomic, assign) uint64_t remoteWindowAddress;
 @property (nonatomic, strong) id laraRemoteCall;   // RemoteCall 实例，强持有
 @property (nonatomic, assign) uint64_t remoteBubbleView;
+@property (nonatomic, assign) CGPoint bubbleCenter;   // step19: 当前球中心（本地缓存）
+// step19: NSInvocation 复用所需的远程 selector / class 缓存
+@property (nonatomic, assign) uint64_t axSelSigFor;
+@property (nonatomic, assign) uint64_t axSelInvWithSig;
+@property (nonatomic, assign) uint64_t axSelSetSelector;
+@property (nonatomic, assign) uint64_t axSelSetArg;
+@property (nonatomic, assign) uint64_t axSelInvokeTarget;
+@property (nonatomic, assign) uint64_t axSelPerform;
+@property (nonatomic, assign) uint64_t axClsNSInvocation;
 @end
 
 @implementation CrossAppOverlayController
@@ -68,6 +84,7 @@ static void *axp_suspended_worker(void *arg) {
         _vtableBound = NO;
         _remoteWindowAddress = 0;
         _remoteBubbleView = 0;
+        _bubbleCenter = CGPointMake(350, 310);  // step19: 初始中心 = frame(320,280,60,60) 的中心
     }
     return self;
 }
@@ -220,12 +237,64 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
 }
 
 - (BOOL)bindLaraRemoteCallForSpringBoardWithError:(NSError **)error {
+    // 用户态拿 SpringBoard pid，三路兜底；自签沙盒下 proc_listpids 可能被限制。
+    pid_t sbPid = -1;
+    char nm[64] = {0};
+
+    // 路线 1：proc_listpids + proc_name
+    int pids[4096] = {0};
+    int pcount = proc_listpids(PROC_ALLPIDS, 0, pids, (int)sizeof(pids));
+    for (int i = 0; pcount > 0 && i < pcount; i++) {
+        if (pids[i] <= 0) continue;
+        memset(nm, 0, sizeof(nm));
+        if (proc_name(pids[i], nm, sizeof(nm)) <= 0) continue;
+        if (strcmp(nm, "SpringBoard") == 0) { sbPid = (pid_t)pids[i]; break; }
+    }
+    snprintf(g_axp_pid_diag, sizeof(g_axp_pid_diag), "listpids n=%d sb=%d", pcount, sbPid);
+
+    // 路线 2：sysctl(KERN_PROC_ALL)
+    if (sbPid <= 0) {
+        int mib[3] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL };
+        size_t sz = 0;
+        if (sysctl(mib, 3, NULL, &sz, NULL, 0) == 0 && sz > 0) {
+            struct kinfo_proc *procs = (struct kinfo_proc *)malloc(sz);
+            if (procs) {
+                size_t sz2 = sz;
+                if (sysctl(mib, 3, procs, &sz2, NULL, 0) == 0) {
+                    int cnt = (int)(sz2 / sizeof(struct kinfo_proc));
+                    for (int i = 0; i < cnt; i++) {
+                        memset(nm, 0, sizeof(nm));
+                        proc_name(procs[i].kp_proc.p_pid, nm, sizeof(nm));
+                        if (strcasecmp(nm, "SpringBoard") == 0) { sbPid = procs[i].kp_proc.p_pid; break; }
+                    }
+                }
+                free(procs);
+            }
+        }
+        snprintf(g_axp_pid_diag, sizeof(g_axp_pid_diag), "sysctl sb=%d", sbPid);
+    }
+
+    // 路线 3：直接扫常见 pid 区间（SpringBoard 通常 pid < 500）
+    if (sbPid <= 0) {
+        for (int pid = 1; pid < 1000; pid++) {
+            memset(nm, 0, sizeof(nm));
+            if (proc_name(pid, nm, sizeof(nm)) > 0 && strcmp(nm, "SpringBoard") == 0) {
+                sbPid = pid; break;
+            }
+        }
+        snprintf(g_axp_pid_diag, sizeof(g_axp_pid_diag), "brute sb=%d", sbPid);
+    }
+
+    printf("(crossapp) SpringBoard pid (userspace) = %d [%s]\n", sbPid, g_axp_pid_diag);
+    [RemoteCall setTargetPidOverride:(sbPid > 0 ? sbPid : 0)];
+
     // 必须在 ds_run() 成功之后调用；RemoteCall 依赖内核 R/W 拿目标 task port。
     RemoteCall *rc = [[RemoteCall alloc] initWithProcess:@"SpringBoard" useMigFilterBypass:NO];
     if (rc == nil) {
         NSString *detail = [RemoteCall lastInitError] ?: @"RemoteCall(SpringBoard) 返回 nil";
+        NSString *pidInfo = [NSString stringWithUTF8String:g_axp_pid_diag] ?: @"";
         if (error) {
-            *error = CrossAppError(CrossAppErrorSpringBoardAbsent, @"%@", detail);
+            *error = CrossAppError(CrossAppErrorSpringBoardAbsent, @"%@ [%@]", detail, pidInfo);
         }
         return NO;
     }
@@ -235,111 +304,281 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
 
 - (BOOL)installLaraSpringBoardOverlayWithWindowLevel:(double)windowLevel error:(NSError **)error {
     RemoteCall *proc = (RemoteCall *)self.laraRemoteCall;
+    // step20: 野生 window 的持久标识。App 重启后 self.remoteBubbleView 归零，
+    // 靠 tag 遍历 SpringBoard.windows 清掉上一轮遗留的球，避免累积多个红球。
+    const uint64_t AX_BALL_TAG = 0x585850; // 'AXP'
     if (proc == nil) {
-        if (error) {
-            *error = CrossAppError(CrossAppErrorBackendNotReady,
-                                   @"RemoteCall 未绑定；先调用 bindLaraRemoteCallForSpringBoardWithError:");
-        }
+        if (error) *error = CrossAppError(CrossAppErrorBackendNotReady,
+                                          @"RemoteCall 未绑定；先调用 bindLaraRemoteCallForSpringBoardWithError:");
         return NO;
     }
 
-    // 参考 lara rc.m::freakywindow：拿到 SpringBoard 自己的 keyWindow，
-    // 把悬浮视图挂进去。这个视图属于 SpringBoard 进程，天然悬浮在所有 App 之上。
+    // step8 实测链（AXAUTO 真机验证）：
+    //   step7 init via performSelectorOnMainThread 成功；trojan 线程 remote_setCGRect(setFrame:)
+    //   崩在 objc_unsafeClaimAutoreleasedReturnValue → 0x401(FAKE_LR_TROJAN)。
+    //   根因：SpringBoard 的 objc 返回优化会消费 fake LR=0x401。任何可能走 objc 返回优化的
+    //   selector 都必须派发到主线程；performSelectorOnMainThread 只支持单 id 参数。
+    // 规避：改用 UIWindow（initWithWindowScene: 单对象参数、默认全屏，无需 setFrame），
+    //   alloc 用 objc_alloc(C 函数)，init/makeKeyAndVisible 全部 performSelector 主线程。
     uint64_t clsUIApplication = remote_getClass(proc, "UIApplication");
-    uint64_t clsUIView        = remote_getClass(proc, "UIView");
-    uint64_t clsUIColor       = remote_getClass(proc, "UIColor");
-    if (clsUIApplication == 0 || clsUIView == 0 || clsUIColor == 0) {
-        if (error) {
-            *error = CrossAppError(CrossAppErrorWindowFailed,
-                                   @"SpringBoard 内解析 UIApplication/UIView/UIColor 失败");
-        }
+    uint64_t clsUIWindow      = remote_getClass(proc, "UIWindow");
+    if (clsUIApplication == 0 || clsUIWindow == 0) {
+        if (error) *error = CrossAppError(CrossAppErrorWindowFailed,
+                                          @"SpringBoard 内解析 UIApplication/UIWindow 失败");
         return NO;
     }
 
-    uint64_t selSharedApp = remote_sel(proc, "sharedApplication");
-    uint64_t selKeyWindow = remote_sel(proc, "keyWindow");
-    uint64_t selWindows   = remote_sel(proc, "windows");
-    uint64_t selFirst     = remote_sel(proc, "firstObject");
-    uint64_t selDelegate  = remote_sel(proc, "delegate");
-    uint64_t selWindow    = remote_sel(proc, "window");
+    uint64_t selSharedApp   = remote_sel(proc, "sharedApplication");
+    uint64_t selKeyWindow   = remote_sel(proc, "keyWindow");
+    uint64_t selScene       = remote_sel(proc, "windowScene");
+    uint64_t selPerform     = remote_sel(proc, "performSelectorOnMainThread:withObject:waitUntilDone:");
+    uint64_t selInitScene   = remote_sel(proc, "initWithWindowScene:");
+    uint64_t selMakeVisible = remote_sel(proc, "makeKeyAndVisible");
 
     uint64_t app = remote_msg(proc, clsUIApplication, selSharedApp, 0, 0, 0, 0);
-    uint64_t window = 0;
-    if (app != 0) {
-        window = remote_msg(proc, app, selKeyWindow, 0, 0, 0, 0);
-        if (window == 0) {
-            uint64_t windows = remote_msg(proc, app, selWindows, 0, 0, 0, 0);
-            if (windows != 0) {
-                window = remote_msg(proc, windows, selFirst, 0, 0, 0, 0);
-            }
-        }
-        if (window == 0) {
-            uint64_t delegate = remote_msg(proc, app, selDelegate, 0, 0, 0, 0);
-            if (delegate != 0) {
-                window = remote_msg(proc, delegate, selWindow, 0, 0, 0, 0);
-            }
-        }
-    }
-    if (window == 0) {
-        if (error) {
-            *error = CrossAppError(CrossAppErrorWindowFailed, @"SpringBoard 内未找到可用 keyWindow");
-        }
+    if (app == 0) {
+        if (error) *error = CrossAppError(CrossAppErrorWindowFailed, @"SpringBoard sharedApplication=0");
         return NO;
     }
+    uint64_t keyWin = remote_msg(proc, app, selKeyWindow, 0, 0, 0, 0);
+    uint64_t scene = keyWin ? remote_msg(proc, keyWin, selScene, 0, 0, 0, 0) : 0;
 
-    // 若已挂过，先移除，避免重复叠加。
+    // 旧清理仅处理本实例引用；跨实例遗留 window 由下方 tag 遍历统一清除。
     if (self.remoteBubbleView != 0) {
         uint64_t selRemove = remote_sel(proc, "removeFromSuperview");
-        uint64_t selPerform = remote_sel(proc, "performSelectorOnMainThread:withObject:waitUntilDone:");
         remote_msg(proc, self.remoteBubbleView, selPerform, selRemove, 0, 1, 0);
         self.remoteBubbleView = 0;
     }
 
-    // alloc/init 一个 UIView 作为悬浮球，参考 lara rc.m 的 remote_msg 模式。
-    uint64_t bubble = RemoteArbCall(proc, objc_alloc, clsUIView);
-    if (bubble == 0) {
-        if (error) {
-            *error = CrossAppError(CrossAppErrorWindowFailed, @"SpringBoard 内 objc_alloc(UIView) 返回 0");
-        }
-        return NO;
-    }
-    uint64_t selInitFrame = remote_sel(proc, "initWithFrame:");
-    uint64_t selSetFrame  = remote_sel(proc, "setFrame:");
-
-    // 用 CGRectZero init（remote_msg 只能传整型寄存器，frame 用 setFrame 补）。
-    bubble = remote_msg(proc, bubble, selInitFrame, 0, 0, 0, 0);
-    if (bubble == 0) {
-        if (error) {
-            *error = CrossAppError(CrossAppErrorWindowFailed, @"SpringBoard 内 initWithFrame: 返回 0");
-        }
+    uint64_t win = RemoteArbCall(proc, objc_alloc, clsUIWindow);
+    if (win == 0) {
+        if (error) *error = CrossAppError(CrossAppErrorWindowFailed, @"SpringBoard objc_alloc(UIWindow)=0");
         return NO;
     }
 
-    // 悬浮球尺寸/位置：屏幕右上角区域，60x60 圆形。
-    remote_setCGRect(proc, bubble, selSetFrame, CGRectMake(300, 140, 60, 60));
-
-    uint64_t selSetBg      = remote_sel(proc, "setBackgroundColor:");
-    uint64_t selSetHidden  = remote_sel(proc, "setHidden:");
-    uint64_t selSetUserInt = remote_sel(proc, "setUserInteractionEnabled:");
-    uint64_t selAddSubview = remote_sel(proc, "addSubview:");
-    uint64_t selPerform    = remote_sel(proc, "performSelectorOnMainThread:withObject:waitUntilDone:");
-
-    // UIColor colorWithRed:green:blue:alpha: 需要 double 寄存器，改用系统蓝色常量选择器。
-    uint64_t selBlueColor = remote_sel(proc, "blueColor");
-    uint64_t color = remote_msg(proc, clsUIColor, selBlueColor, 0, 0, 0, 0);
-    if (color != 0) {
-        remote_msg(proc, bubble, selSetBg, color, 0, 0, 0);
+    // initWithWindowScene: 单对象参数，主线程执行。scene 为 0 时回退 init。
+    if (scene != 0) {
+        remote_msg(proc, win, selPerform, selInitScene, scene, 1, 0);
+    } else {
+        uint64_t selInit = remote_sel(proc, "init");
+        remote_msg(proc, win, selPerform, selInit, 0, 1, 0);
     }
-    remote_msg(proc, bubble, selSetHidden, 0, 0, 0, 0);
-    remote_msg(proc, bubble, selSetUserInt, 1, 0, 0, 0);
+    // step11: performSelectorOnMainThread 只能传对象，无法传 double(windowLevel)/CGRect(frame)。
+    //   用 NSInvocation 在 trojan 线程编码标量/结构体参数，invokeWithTarget: 派发到主线程执行，
+    //   目标 setter（setWindowLevel:/setFrame:/setBackgroundColor:）全部落在 SpringBoard 主线程，
+    //   彻底绕开 CA_ASSERT 与 objc_unsafeClaim 消费 fake LR=0x401 的问题。
+    uint64_t clsNSInvocation = remote_getClass(proc, "NSInvocation");
+    uint64_t clsUIColor      = remote_getClass(proc, "UIColor");
+    uint64_t selSigFor       = remote_sel(proc, "methodSignatureForSelector:");
+    uint64_t selInvWithSig   = remote_sel(proc, "invocationWithMethodSignature:");
+    uint64_t selSetSelector  = remote_sel(proc, "setSelector:");
+    uint64_t selSetArg       = remote_sel(proc, "setArgument:atIndex:");
+    uint64_t selInvokeTarget = remote_sel(proc, "invokeWithTarget:");
+    uint64_t selGetReturn    = remote_sel(proc, "getReturnValue:");
+    if (clsNSInvocation == 0) {
+        if (error) *error = CrossAppError(CrossAppErrorWindowFailed, @"NSInvocation class=0");
+        return NO;
+    }
+    // step19: 缓存到实例变量，供 moveOverlayToPoint: 复用同一套 NSInvocation 机制。
+    self.axSelSigFor = selSigFor;
+    self.axSelInvWithSig = selInvWithSig;
+    self.axSelSetSelector = selSetSelector;
+    self.axSelSetArg = selSetArg;
+    self.axSelInvokeTarget = selInvokeTarget;
+    self.axSelPerform = selPerform;
+    self.axClsNSInvocation = clsNSInvocation;
 
-    // 在主线程把悬浮球挂到 SpringBoard keyWindow。
-    remote_msg(proc, window, selPerform, selAddSubview, bubble, 1, 0);
-    remote_msg(proc, window, selPerform, remote_sel(proc, "bringSubviewToFront:"), bubble, 1, 0);
+    // 辅助：构造 invocation 并主线程 invokeWithTarget:。argPtr/argSize 为 nil/0 表示无参数。
+    // 参数本身是普通指针/整数，setArgument:atIndex: 是纯结构体拷贝，trojan 线程安全。
+    // step18: 支持指定 target（win / win.layer 等）。
+    uint64_t (^invokeSetterOn)(uint64_t, const char *, void *, size_t) = ^uint64_t(uint64_t target, const char *selName, void *argPtr, size_t argSize) {
+        uint64_t targetSel = remote_sel(proc, selName);
+        AXStepLog(@"%s targetSel=%llu", selName, targetSel);
+        if (targetSel == 0) return 0;
+        uint64_t sig = remote_msg(proc, target, selSigFor, targetSel, 0, 0, 0);
+        AXStepLog(@"%s sig=%llu", selName, sig);
+        if (sig == 0) return 0;
+        uint64_t inv = remote_msg(proc, clsNSInvocation, selInvWithSig, sig, 0, 0, 0);
+        AXStepLog(@"%s inv=%llu", selName, inv);
+        if (inv == 0) return 0;
+        remote_msg(proc, inv, selSetSelector, targetSel, 0, 0, 0);
+        AXStepLog(@"%s setSelector done inv=%llu", selName, inv);
+        if (argPtr != NULL && argSize > 0) {
+            BOOL wrote = [proc remote_write:proc.trojanMem from:argPtr size:argSize];
+            uint64_t check = [proc remoteRead64From:proc.trojanMem];
+            AXStepLog(@"%s wrote=%d argSize=%zu trojanMem=%llu val=%llu", selName, wrote, argSize, proc.trojanMem, check);
+            remote_msg(proc, inv, selSetArg, proc.trojanMem, 2, 0, 0);
+            AXStepLog(@"%s setArg done", selName);
+        }
+        // invokeWithTarget: 单对象参数，主线程执行目标 setter。
+        AXStepLog(@"%s invoking target=%llu perform=%llu invokeSel=%llu", selName, target, selPerform, selInvokeTarget);
+        // step16: 恢复同步派发（waitUntilDone=1）。step15 的"死锁"假设是错的：
+        //   SpringBoard-2026-11-27-231618.ips 铁证 = setFrame: 之后 trojan 线程上
+        //   +[UIColor redColor] 对象返回触发 objc_retainAutoreleaseReturnValue，
+        //   消费 fake LR=0x401 → EXC_BAD_ACCESS。不是死锁，是崩溃。
+        //   同步派发保证 4 个 setter 顺序执行、可诊断。
+        remote_msg(proc, inv, selPerform, selInvokeTarget, target, 1, 0);
+        AXStepLog(@"%s invoked(sync) done", selName);
+        return inv;
+    };
+    uint64_t (^invokeSetter)(const char *, void *, size_t) = ^uint64_t(const char *selName, void *argPtr, size_t argSize) {
+        return invokeSetterOn(win, selName, argPtr, argSize);
+    };
 
-    self.remoteBubbleView = bubble;
-    self.remoteWindowAddress = window;
+    // 1) 悬浮球 frame 60x60，右侧中部吸边。CGRect 走 setArgument 结构体拷贝。
+    CGRect bubbleFrame = CGRectMake(320, 280, 60, 60);
+    invokeSetter("setFrame:", &bubbleFrame, sizeof(bubbleFrame));
+    // step20: 打持久 tag，供下次 install 遍历清理。
+    uint64_t tagVal = AX_BALL_TAG;
+    invokeSetter("setTag:", &tagVal, sizeof(tagVal));
+
+    // step17: 主线程执行返回对象的 selector（如 +redColor），用 getReturnValue: 纯内存拷贝读回，
+    //   彻底绕开 trojan 线程 objc_retainAutoreleaseReturnValue 消费 fake LR=0x401 的崩溃链。
+    uint64_t (^invokeObjectGetter)(const char *, uint64_t) = ^uint64_t(const char *selName, uint64_t target) {
+        uint64_t targetSel = remote_sel(proc, selName);
+        AXStepLog(@"get %s targetSel=%llu", selName, targetSel);
+        if (targetSel == 0) return 0;
+        uint64_t sig = remote_msg(proc, target, selSigFor, targetSel, 0, 0, 0);
+        if (sig == 0) return 0;
+        uint64_t inv = remote_msg(proc, clsNSInvocation, selInvWithSig, sig, 0, 0, 0);
+        if (inv == 0) return 0;
+        remote_msg(proc, inv, selSetSelector, targetSel, 0, 0, 0);
+        // invokeWithTarget: 主线程同步执行 getter，返回对象落在 invocation 的 return buffer。
+        remote_msg(proc, inv, selPerform, selInvokeTarget, target, 1, 0);
+        AXStepLog(@"get %s invoked done", selName);
+        // getReturnValue: 是纯 memcpy，trojan 线程安全，不会触发 objc 返回优化。
+        remote_msg(proc, inv, selGetReturn, proc.trojanMem, 0, 0, 0);
+        uint64_t ret = [proc remoteRead64From:proc.trojanMem];
+        AXStepLog(@"get %s ret=%llu", selName, ret);
+        return ret;
+    };
+
+    // 2) 主线程取 UIColor redColor，设为窗口背景，验证真正可见的跨 App 悬浮。
+    uint64_t redColor = invokeObjectGetter("redColor", clsUIColor);
+    if (redColor != 0) invokeSetter("setBackgroundColor:", &redColor, sizeof(redColor));
+
+    // step18: 主线程取 win.layer，设 cornerRadius + masksToBounds 把方块切成圆形悬浮球。
+    uint64_t winLayer = invokeObjectGetter("layer", win);
+    AXStepLog(@"winLayer=%llu", winLayer);
+    if (winLayer != 0) {
+        CGFloat radius = 30.0;
+        invokeSetterOn(winLayer, "setCornerRadius:", &radius, sizeof(radius));
+        BOOL masks = YES;
+        invokeSetterOn(winLayer, "setMasksToBounds:", &masks, sizeof(masks));
+    }
+
+    // 3) windowLevel = 10000000（AX 实测值），double 走 setArgument 8 字节。
+    double level = windowLevel;
+    invokeSetter("setWindowLevel:", &level, sizeof(level));
+
+    // step12: makeKeyAndVisible 会抢占 SpringBoard 的 keyWindow，
+    //   触发 SBCoverSheetDisableIdleTimerForGestureInProgress → CoverSheet/锁屏面板
+    //   （22:50:43 syslog 铁证：BiometricEvent value:3 + SleepLockScreen 激活）。
+    //   改用 setHidden:NO 让窗口参与合成显示，但不夺 keyWindow，不会拉下锁屏。
+    //   BOOL 参数经 NSInvocation setArgument: 编码（走方法签名 char 类型），主线程 invoke。
+    BOOL shown = NO;
+    invokeSetter("setHidden:", &shown, sizeof(shown));
+
+    self.remoteBubbleView = win;
+    self.remoteWindowAddress = win;
+
+    // step23 dlopen 探针（AXDLPROBE=1 触发，单变量，不碰已验证注入链）：
+    // 验证 RemoteArbCall 能否在 SpringBoard 内 dlopen 系统 dylib 并读回 dlerror。
+    // 系统库在 dyld 共享缓存，本地/远程地址一致，不涉及自签 library validation，
+    // 是验证「RemoteCall → dlopen」通路本身是否可用的最小实验。
+    const char *dlEnv = getenv("AXDLPROBE");
+    if (dlEnv != NULL && strcmp(dlEnv, "1") == 0) {
+        AXStepLog(@"DLPROBE begin pid=%d", proc.pid);
+        const char *sysPath = "/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices";
+        uint64_t mem = proc.trojanMem;
+        BOOL wrote = [proc remote_write:mem from:sysPath size:strlen(sysPath) + 1];
+        AXStepLog(@"DLPROBE wrote=%d mem=%llu", wrote, mem);
+        // dlopen 走本地函数指针（共享缓存地址一致），成功返回非 0 句柄。
+        // 用 RTLD_LAZY(1) 最快返回，只验证通路，不做符号解析。
+        uint64_t hSys = RemoteArbCallWithTimeout(15, proc, dlopen, mem, (uint64_t)RTLD_LAZY);
+        AXStepLog(@"DLPROBE dlopen(BBS)=%llu", hSys);
+        AXStepLog(@"DLPROBE end");
+    }
+
+    // step24: 在 step23 已证实 RemoteArbCall→dlopen 通路可用后，单变量验证自签 handler dylib。
+    // 仅 AXHANDLER=1 触发，沿用已验证窗口和 NSInvocation 链，不改动红球主体逻辑。
+    const char *handlerEnv = getenv("AXHANDLER");
+    if (handlerEnv != NULL && strcmp(handlerEnv, "1") == 0) {
+        AXStepLog(@"HANDLER begin pid=%d win=%llu", proc.pid, win);
+        const char *bundlePath = [[[NSBundle mainBundle] bundlePath] fileSystemRepresentation];
+        NSString *dylibPath = [NSString stringWithFormat:@"%s/Frameworks/libAXOverlayHandler.dylib", bundlePath ?: ""];
+        uint64_t p = remote_alloc_str(proc, dylibPath.fileSystemRepresentation);
+        AXStepLog(@"HANDLER path=%@ remotePath=%llu", dylibPath, p);
+        uint64_t h = RemoteArbCallWithTimeout(15, proc, dlopen, p, (uint64_t)RTLD_NOW);
+        AXStepLog(@"HANDLER dlopen=%llu", h);
+        if (h != 0) {
+            uint64_t probeName = remote_alloc_str(proc, "AXHandlerProbe");
+            uint64_t attachName = remote_alloc_str(proc, "AXHandlerAttach");
+            uint64_t probe = RemoteArbCallWithTimeout(15, proc, dlsym, h, probeName);
+            uint64_t attach = RemoteArbCallWithTimeout(15, proc, dlsym, h, attachName);
+            AXStepLog(@"HANDLER dlsym probe=%llu attach=%llu", probe, attach);
+            if (probe != 0) RemoteArbCallWithTimeout(15, proc, (void *)(uintptr_t)probe, (uint64_t)0x1234);
+            if (attach != 0) RemoteArbCallWithTimeout(15, proc, (void *)(uintptr_t)attach, win);
+            AXStepLog(@"HANDLER attach done");
+        }
+        AXStepLog(@"HANDLER end");
+    }
+
+    // step25: 不用注入代码，纯 RemoteCall 判定这个野生 window 是否进入触摸 hitTest 链。
+    // 给 window 挂一个 UIPanGestureRecognizer（无需 target/action，UIGestureRecognizer 自身会跟踪 state）。
+    // 之后每 0.5s 读回 recognizer 的 state：0=Possible 1=Began 2=Changed 3=Ended。
+    // 若主机/手指在球上拖动时 state 变为 1/2/3 => hitTest 通；一直 0 => 不在事件链。
+    const char *hitEnv = getenv("AXHITTEST");
+    if (hitEnv != NULL && strcmp(hitEnv, "1") == 0) {
+        AXStepLog(@"HITPROBE begin win=%llu", win);
+        uint64_t clsPan = remote_getClass(proc, "UIPanGestureRecognizer");
+        uint64_t selInit2 = remote_sel(proc, "init");
+        uint64_t selAddGR = remote_sel(proc, "addGestureRecognizer:");
+        uint64_t selState = remote_sel(proc, "state");
+        uint64_t selLocInWin = remote_sel(proc, "locationInView:");
+        AXStepLog(@"HITPROBE clsPan=%llu stateSel=%llu locSel=%llu", clsPan, selState, selLocInWin);
+        uint64_t pan = RemoteArbCall(proc, objc_alloc, clsPan);
+        AXStepLog(@"HITPROBE alloc pan=%llu", pan);
+        if (pan != 0) {
+            remote_msg(proc, pan, selPerform, selInit2, 0, 1, 0);
+            remote_msg(proc, win, selPerform, selAddGR, pan, 1, 0);
+            BOOL interactive = YES;
+            invokeSetter("setUserInteractionEnabled:", &interactive, sizeof(interactive));
+            AXStepLog(@"HITPROBE attached pan=%llu win=%llu", pan, win);
+            self.axHitPan = pan;
+            // 每 0.5s 采样一次 state，共 16 次（8s），覆盖 HID 注入窗口。
+            // 用 main queue 采样，与注入链同线程，避免 RemoteCall trojan 线程竞态。
+            for (int i = 0; i < 16; i++) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * i * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    uint64_t st = remote_msg(proc, pan, selState, 0, 0, 0, 0);
+                    AXStepLog(@"HITPROBE sample[%d] pan=%llu state=%llu", i, pan, st);
+                });
+            }
+        }
+        AXStepLog(@"HITPROBE end");
+    }
+
     return YES;
+}
+
+// step14: stdout/stderr 不进 syslog，诊断落盘到 Documents/axstep.log，用 pymobiledevice3 拉取。
+static void AXStepLog(NSString *fmt, ...) {
+    va_list args; va_start(args, fmt);
+    NSString *line = [[NSString alloc] initWithFormat:fmt arguments:args];
+    va_end(args);
+    static NSFileHandle *fh = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        NSString *path = [doc stringByAppendingPathComponent:@"axstep.log"];
+        [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
+        fh = [NSFileHandle fileHandleForWritingAtPath:path];
+    });
+    NSString *stamped = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], line];
+    [fh seekToEndOfFile];
+    [fh writeData:[stamped dataUsingEncoding:NSUTF8StringEncoding]];
+    [fh synchronizeFile];
 }
 
 - (BOOL)installCrossAppOverlayWithWindowLevel:(double)windowLevel error:(NSError **)error {
@@ -354,6 +593,40 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
         }
     }
     return [self installLaraSpringBoardOverlayWithWindowLevel:windowLevel error:error];
+}
+
+// step19: 实时移动跨 App 球。复用 install 缓存的 NSInvocation selector，
+// 在 SpringBoard 主线程对 win 执行 setFrame:，规避 trojan 线程 objc 返回优化崩溃。
+- (BOOL)moveOverlayToPoint:(CGPoint)point error:(NSError **)error {
+    RemoteCall *proc = (RemoteCall *)self.laraRemoteCall;
+    uint64_t win = self.remoteWindowAddress;
+    if (proc == nil || win == 0 || self.axClsNSInvocation == 0) {
+        if (error) *error = CrossAppError(CrossAppErrorBackendNotReady,
+                                          @"跨 App 球未安装或 invocation 未缓存");
+        return NO;
+    }
+    // 记录圆心，frame 以 60x60 反推原点；吸边限制在屏幕内。
+    CGFloat size = 60.0;
+    CGFloat originX = MAX(0, MIN(point.x - size/2.0, [UIScreen mainScreen].bounds.size.width - size));
+    CGFloat originY = MAX(0, MIN(point.y - size/2.0, [UIScreen mainScreen].bounds.size.height - size));
+    self.bubbleCenter = CGPointMake(originX + size/2.0, originY + size/2.0);
+    CGRect frame = CGRectMake(originX, originY, size, size);
+
+    uint64_t targetSel = remote_sel(proc, "setFrame:");
+    if (targetSel == 0) return NO;
+    uint64_t sig = remote_msg(proc, win, self.axSelSigFor, targetSel, 0, 0, 0);
+    if (sig == 0) return NO;
+    uint64_t inv = remote_msg(proc, self.axClsNSInvocation, self.axSelInvWithSig, sig, 0, 0, 0);
+    if (inv == 0) return NO;
+    remote_msg(proc, inv, self.axSelSetSelector, targetSel, 0, 0, 0);
+    [proc remote_write:proc.trojanMem from:&frame size:sizeof(frame)];
+    remote_msg(proc, inv, self.axSelSetArg, proc.trojanMem, 2, 0, 0);
+    remote_msg(proc, inv, self.axSelPerform, self.axSelInvokeTarget, win, 1, 0);
+    return YES;
+}
+
+- (CGPoint)currentOverlayCenter {
+    return self.bubbleCenter;
 }
 
 - (BOOL)installCrossAppOverlayViaSyscallChainWithWindowLevel:(double)windowLevel error:(NSError **)error {
