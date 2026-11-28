@@ -629,6 +629,17 @@ static void AXStepLog(NSString *fmt, ...) {
     return self.bubbleCenter;
 }
 
+- (void)teardownRemoteCall {
+    RemoteCall *rc = self.laraRemoteCall;
+    if (rc == nil) return;
+    AXStepLog(@"TEARDOWN begin pid=%d", rc.pid);
+    [rc destroyRemoteCall];
+    self.laraRemoteCall = nil;
+    self.vtableBound = NO;
+    memset(&_vtable, 0, sizeof(_vtable));
+    AXStepLog(@"TEARDOWN done");
+}
+
 - (BOOL)installCrossAppOverlayViaSyscallChainWithWindowLevel:(double)windowLevel error:(NSError **)error {
     if (![self probeLocalSuspendedThreadSequenceWithError:error]) {
         return NO;
