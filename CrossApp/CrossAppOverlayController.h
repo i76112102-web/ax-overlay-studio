@@ -52,6 +52,9 @@ typedef struct {
 // 红球 UIWindow 由 SpringBoard 自身持有，清理 RemoteCall 不影响其显示。
 - (void)teardownRemoteCall;
 
+// App 退出时先隐藏/移除 SpringBoard 里的红球窗口，再安全销毁 RemoteCall。
+- (void)removeCrossAppOverlayAndTeardown;
+
 // step19: 实时移动跨 App 悬浮球到屏幕坐标（App 内拖动垫 → kcall setFrame）。
 // 球本身在 SpringBoard 进程，位置更新通过 NSInvocation 主线程 setFrame: 落地。
 - (BOOL)moveOverlayToPoint:(CGPoint)point error:(NSError **)error;
