@@ -286,7 +286,8 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
     }
 
     printf("(crossapp) SpringBoard pid (userspace) = %d [%s]\n", sbPid, g_axp_pid_diag);
-    [RemoteCall setTargetPidOverride:(sbPid > 0 ? sbPid : 0)];
+    // 远程 main 分支的 RemoteCall.h 没有 setTargetPidOverride；initWithProcess:@"SpringBoard"
+    // 内部自己解析 pid，这里不做 override，避免链接到未声明方法。
 
     // 必须在 ds_run() 成功之后调用；RemoteCall 依赖内核 R/W 拿目标 task port。
     RemoteCall *rc = [[RemoteCall alloc] initWithProcess:@"SpringBoard" useMigFilterBypass:NO];
@@ -431,6 +432,13 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
     // step20: 打持久 tag，供下次 install 遍历清理。
     uint64_t tagVal = AX_BALL_TAG;
     invokeSetter("setTag:", &tagVal, sizeof(tagVal));
+
+    // step27: 让红球窗口本身接收全局触摸。普通野生 UIWindow 默认 hitTest 不参与 SpringBoard 事件链，
+    // 参考 AX 的 HID 全局坐标方案时仍需要窗口层 userInteractionEnabled=YES + opaque=NO。
+    BOOL interactive = YES;
+    invokeSetter("setUserInteractionEnabled:", &interactive, sizeof(interactive));
+    BOOL opaque = NO;
+    invokeSetter("setOpaque:", &opaque, sizeof(opaque));
 
     // step17: 主线程执行返回对象的 selector（如 +redColor），用 getReturnValue: 纯内存拷贝读回，
     //   彻底绕开 trojan 线程 objc_retainAutoreleaseReturnValue 消费 fake LR=0x401 的崩溃链。
