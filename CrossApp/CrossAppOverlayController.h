@@ -47,6 +47,11 @@ typedef struct {
 - (BOOL)installCrossAppOverlayWithWindowLevel:(double)windowLevel error:(NSError **)error;
 - (BOOL)removeCrossAppOverlayWithError:(NSError **)error;
 
+// 退后台时清理 RemoteCall 的异常驱动 trojan 线程（pthread_exit 安全退出），
+// 避免 trojan 返回到 FAKE_LR_TROJAN (0x401) 打崩 SpringBoard 导致锁屏。
+// 红球 UIWindow 由 SpringBoard 自身持有，清理 RemoteCall 不影响其显示。
+- (void)teardownRemoteCall;
+
 // step19: 实时移动跨 App 悬浮球到屏幕坐标（App 内拖动垫 → kcall setFrame）。
 // 球本身在 SpringBoard 进程，位置更新通过 NSInvocation 主线程 setFrame: 落地。
 - (BOOL)moveOverlayToPoint:(CGPoint)point error:(NSError **)error;
