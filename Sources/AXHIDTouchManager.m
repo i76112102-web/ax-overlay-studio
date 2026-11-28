@@ -58,7 +58,17 @@ static void AXHIDLog(NSString *fmt, ...) {
 // path 不是 callback 参数，运行时对 a0/a1/a2 及其 +0x10 做候选探测。
 static void axhid_callback(void *a0, void *a1, void *a2, void *a3, void *a4, void *a5) {
     AXHIDTouchManager *me = sManager;
-    if (me == nil || sGetPoint == NULL) return;
+    if (me == nil) return;
+
+    // 入口无条件打点（限流前 40 次）：确认 callback 到底有没有被系统调用。
+    // 只记录指针值，不对任何参数解引用/调用，避免非法指针崩溃。
+    static int entryBudget = 40;
+    if (entryBudget > 0) {
+        entryBudget--;
+        AXHIDLog(@"ENTRY a0=%p a1=%p a2=%p a3=%p a4=%p a5=%p", a0, a1, a2, a3, a4, a5);
+    }
+
+    if (sGetPoint == NULL) return;
 
     // 静态反汇编确认（_re\AX_HID_SIGNATURE_FINDINGS.md）：
     //   callback 第4参数 x3 = event（入口 str x3,[x19,#0x20]，随后传 IOHIDEventGetType）
