@@ -19,17 +19,20 @@ didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
 }
 
 - (void)applicationWillResignActive:(UIApplication *)application {
-    // 铁证：SpringBoard-2026-11-28-033325.ips 触发线程 pc=0x401 lr=0x401
-    // = RemoteCall.h FAKE_LR_TROJAN。RemoteCall 的异常驱动 trojan/creator 线程
-    // 依赖本进程异常处理；App 退后台被挂起后异常无人应答，线程跳 0x401 打崩 SpringBoard → 锁屏。
-    // 必须在仍前台（active→inactive，本进程异常处理器可用）时提前 destroy，
-    // 让 trojan 线程经 pthread_exit 安全退出。红球 UIWindow 由 SpringBoard 持有，显示不受影响。
-    [[CrossAppOverlayController sharedController] teardownRemoteCall];
+    // 切到其它 App：保留红球（跨 App 悬浮核心需求），也保留 RemoteCall，
+    // 这样杀掉 App 时还能用它把红球 setHidden。
     self.window.hidden = YES;
 }
 
 - (void)applicationWillEnterForeground:(UIApplication *)application {
     self.window.hidden = NO;
+}
+
+- (void)applicationWillTerminate:(UIApplication *)application {
+    // 上划杀掉 App：先移除红球，再安全销毁 RemoteCall。
+    // 顺序不能反：RemoteCall 销毁后就没有通道隐藏 SpringBoard 里的窗口了。
+    // 同时避免 trojan 线程返回 FAKE_LR_TROJAN(0x401) 打崩 SpringBoard → 锁屏。
+    [[CrossAppOverlayController sharedController] removeCrossAppOverlayAndTeardown];
 }
 
 @end
