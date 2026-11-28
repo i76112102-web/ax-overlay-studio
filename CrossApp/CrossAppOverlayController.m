@@ -286,8 +286,11 @@ static NSError *CrossAppError(CrossAppErrorCode code, NSString *format, ...) {
     }
 
     printf("(crossapp) SpringBoard pid (userspace) = %d [%s]\n", sbPid, g_axp_pid_diag);
-    // 远程 main 分支的 RemoteCall.h 没有 setTargetPidOverride；initWithProcess:@"SpringBoard"
-    // 内部自己解析 pid，这里不做 override，避免链接到未声明方法。
+    // 内核按名扫描 proc_find_named_from_self 在 iOS 18.1/A17 上对 SpringBoard 失准；
+    // 用户态枚举到的 pid 通过 override 直接走 proc_find_pid_from_self，更可靠。
+    if (sbPid > 0) {
+        [RemoteCall setTargetPidOverride:sbPid];
+    }
 
     // 必须在 ds_run() 成功之后调用；RemoteCall 依赖内核 R/W 拿目标 task port。
     RemoteCall *rc = [[RemoteCall alloc] initWithProcess:@"SpringBoard" useMigFilterBypass:NO];
