@@ -1,6 +1,7 @@
 #import "CrossAppOverlayController.h"
 #import "RemoteCall.h"
 #import "privateapi.h"
+#import "AXHIDTouchManager.h"
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
 #import <pthread.h>
@@ -649,6 +650,38 @@ static void AXStepLog(NSString *fmt, ...) {
     self.vtableBound = NO;
     memset(&_vtable, 0, sizeof(_vtable));
     AXStepLog(@"TEARDOWN done");
+}
+
+- (void)removeCrossAppOverlayAndTeardown {
+    RemoteCall *proc = (RemoteCall *)self.laraRemoteCall;
+    uint64_t win = self.remoteWindowAddress;
+    AXStepLog(@"REMOVE+TEARDOWN begin pid=%d win=%llu", proc ? proc.pid : -1, win);
+
+    if (proc != nil && win != 0 && self.axClsNSInvocation != 0) {
+        // 在 SpringBoard 主线程对窗口执行 setHidden:YES，复用 install 时验证过的
+        // NSInvocation invokeWithTarget: 路径，规避 trojan 线程 objc 返回优化崩溃。
+        uint64_t targetSel = remote_sel(proc, "setHidden:");
+        if (targetSel != 0) {
+            uint64_t sig = remote_msg(proc, win, self.axSelSigFor, targetSel, 0, 0, 0);
+            if (sig != 0) {
+                uint64_t inv = remote_msg(proc, self.axClsNSInvocation, self.axSelInvWithSig, sig, 0, 0, 0);
+                if (inv != 0) {
+                    remote_msg(proc, inv, self.axSelSetSelector, targetSel, 0, 0, 0);
+                    BOOL hidden = YES;
+                    [proc remote_write:proc.trojanMem from:&hidden size:sizeof(hidden)];
+                    remote_msg(proc, inv, self.axSelSetArg, proc.trojanMem, 2, 0, 0);
+                    remote_msg(proc, inv, self.axSelPerform, self.axSelInvokeTarget, win, 1, 0);
+                    AXStepLog(@"REMOVE setHidden:YES invoked on win=%llu", win);
+                }
+            }
+        }
+    }
+
+    self.remoteBubbleView = 0;
+    self.remoteWindowAddress = 0;
+    [[AXHIDTouchManager sharedManager] stop];
+    [self teardownRemoteCall];
+    AXStepLog(@"REMOVE+TEARDOWN done");
 }
 
 - (BOOL)installCrossAppOverlayViaSyscallChainWithWindowLevel:(double)windowLevel error:(NSError **)error {
