@@ -29,22 +29,39 @@ jobs:
           set -euo pipefail
           DERIVED="$RUNNER_TEMP/DerivedData"
           BUNDLE_ID="${{ vars.BUNDLE_ID || 'com.yourteam.axoverlay' }}"
+          echo "== build app =="
           xcodebuild -project AXOverlayStudio.xcodeproj -scheme AXOverlayStudio -configuration Release \
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$DERIVED" \
             BUNDLE_ID="$BUNDLE_ID" \
+            ARCHS=arm64e \
+            ONLY_ACTIVE_ARCH=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
             clean build
+          echo "== build handler dylib =="
+          mkdir -p build
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun -sdk iphoneos clang -arch arm64e -dynamiclib -fobjc-arc \
+            -miphoneos-version-min=16.5 \
+            -isysroot "$SDK" \
+            -I AXOverlayHandler \
+            -o build/libAXOverlayHandler.dylib \
+            AXOverlayHandler/AXOverlayHandler.m \
+            -framework Foundation -framework UIKit -framework CoreGraphics
+          codesign -f -s - build/libAXOverlayHandler.dylib
           APP=$(find "$DERIVED/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' -print -quit)
           test -n "$APP"
           mkdir -p "$APP/Frameworks"
           cp Vendor/lara/lib/libxpf.dylib "$APP/Frameworks/libxpf.dylib"
           cp Vendor/lara/lib/libgrabkernel2.dylib "$APP/Frameworks/libgrabkernel2.dylib"
+          test -f build/libAXOverlayHandler.dylib
+          cp build/libAXOverlayHandler.dylib "$APP/Frameworks/libAXOverlayHandler.dylib"
           codesign -f -s - "$APP/Frameworks/libxpf.dylib" || true
           codesign -f -s - "$APP/Frameworks/libgrabkernel2.dylib" || true
+          codesign -f -s - "$APP/Frameworks/libAXOverlayHandler.dylib" || true
           codesign -f -s - "$APP" || true
           mkdir -p build
           python3 scripts/make_unsigned_ipa.py "$APP" "build/AXOverlayStudio_unsigned.ipa"
@@ -57,6 +74,7 @@ jobs:
           name: ipa-unsigned-${{ github.run_number }}
           path: |
             build/*.ipa
+            build/*.dylib
             build/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 90
