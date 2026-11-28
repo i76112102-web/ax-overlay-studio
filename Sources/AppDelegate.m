@@ -1,5 +1,6 @@
 #import "AppDelegate.h"
 #import "ViewController.h"
+#import <UIKit/UIKit.h>
 
 @implementation AppDelegate
 
@@ -14,6 +15,17 @@ didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     self.window.rootViewController = root;
     [self.window makeKeyAndVisible];
     return YES;
+}
+
+- (void)applicationDidEnterBackground:(UIApplication *)application {
+    // RemoteCall 的 trojan 线程在 SpringBoard 内是异常驱动的一次性线程；
+    // 宿主 App 退后台后线程状态会失稳，最终跳到 0x401（FAKE_LR_TROJAN）打崩 SpringBoard。
+    // 这里在退后台瞬间只隐藏窗口、不销毁 RemoteCall，避免 trojan 返回路径触发。
+    self.window.hidden = YES;
+}
+
+- (void)applicationWillEnterForeground:(UIApplication *)application {
+    self.window.hidden = NO;
 }
 
 @end
