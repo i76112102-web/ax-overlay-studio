@@ -4,7 +4,10 @@
 #import "FloatingOverlay.h"
 #import "KernelBridge.h"
 #import "CrossAppOverlayController.h"
+#import "AXHIDTouchManager.h"
 #import "darksword_api_shim.h"
+#include <stdlib.h>
+#include <string.h>
 
 @interface ViewController ()
 @property (nonatomic, strong) UILabel *statusLabel;
@@ -21,6 +24,7 @@
 @property (nonatomic, strong) UIView *navCard;
 @property (nonatomic, strong) UIView *toggleView;
 @property (nonatomic, strong) UILabel *statusTitle;
+@property (nonatomic, strong) UIView *dragPad;   // step19: 跨 App 球拖动垫
 @end
 
 @implementation ViewController
@@ -39,6 +43,26 @@
                                              selector:@selector(applyTheme)
                                                  name:@"AXThemeDidChangeNotification"
                                                object:nil];
+    // 测试版自动触发：dvt launch --env AXAUTO=1 时，延迟自动执行 内核初始化 → 注入 SpringBoard。
+    // 绕开 AXAccessibilityAudit.perform_press 对自定义 UIButton 不触发 TouchUpInside 的问题。
+    const char *autoEnv = getenv("AXAUTO");
+    if (autoEnv != NULL && strcmp(autoEnv, "1") == 0) {
+        [self performSelector:@selector(autoSequence) withObject:nil afterDelay:2.0];
+    }
+}
+
+- (void)autoSequence {
+    [self setStatus:@"状态：AUTO 内核初始化中…"];
+    [[KernelBridge sharedBridge] initializeKernelWithCompletion:^(BOOL success, NSString *message) {
+        [self setStatus:[NSString stringWithFormat:@"状态：AUTO %@\n%@",
+                         success ? @"内核就绪" : @"初始化失败", message ?: @""]];
+        if (success) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [self crossAppAction];
+            });
+        }
+    }];
 }
 
 - (void)dealloc {
@@ -142,6 +166,31 @@
     [self.view addSubview:crossButton];
     self.crossAppButton = crossButton;
 
+    // step19: 跨 App 球拖动垫 —— pan 手势通过 kcall 实时移动 SpringBoard 里的悬浮球。
+    UIView *dragPad = [[UIView alloc] init];
+    dragPad.translatesAutoresizingMaskIntoConstraints = NO;
+    dragPad.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.18];
+    dragPad.layer.cornerRadius = 18.0;
+    dragPad.userInteractionEnabled = YES;
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self
+                                                                          action:@selector(handleDragPad:)];
+    [dragPad addGestureRecognizer:pan];
+    UILabel *dragHint = [[UILabel alloc] init];
+    dragHint.translatesAutoresizingMaskIntoConstraints = NO;
+    dragHint.text = @"↔ 拖动这里移动跨 App 悬浮球";
+    dragHint.font = [Theme fontFootnote];
+    dragHint.textColor = [Theme ink];
+    dragHint.textAlignment = NSTextAlignmentCenter;
+    [dragPad addSubview:dragHint];
+    [NSLayoutConstraint activateConstraints:@[
+        [dragHint.centerXAnchor constraintEqualToAnchor:dragPad.centerXAnchor],
+        [dragHint.centerYAnchor constraintEqualToAnchor:dragPad.centerYAnchor],
+        [dragHint.leadingAnchor constraintEqualToAnchor:dragPad.leadingAnchor constant:8],
+        [dragHint.trailingAnchor constraintEqualToAnchor:dragPad.trailingAnchor constant:-8]
+    ]];
+    [self.view addSubview:dragPad];
+    self.dragPad = dragPad;
+
     UILayoutGuide *guide = self.view.safeAreaLayoutGuide;
     CGFloat pad = AXLayoutCompactPad * [Theme scale];
     [NSLayoutConstraint activateConstraints:@[
@@ -209,7 +258,13 @@
         [crossButton.topAnchor constraintEqualToAnchor:localButton.bottomAnchor constant:pad],
         [crossButton.leadingAnchor constraintEqualToAnchor:kernelInitButton.leadingAnchor],
         [crossButton.trailingAnchor constraintEqualToAnchor:kernelInitButton.trailingAnchor],
-        [crossButton.heightAnchor constraintEqualToAnchor:kernelInitButton.heightAnchor]
+        [crossButton.heightAnchor constraintEqualToAnchor:kernelInitButton.heightAnchor],
+
+        // step19: 拖动垫放在最后一个按钮下方。
+        [self.dragPad.topAnchor constraintEqualToAnchor:crossButton.bottomAnchor constant:pad],
+        [self.dragPad.leadingAnchor constraintEqualToAnchor:kernelInitButton.leadingAnchor],
+        [self.dragPad.trailingAnchor constraintEqualToAnchor:kernelInitButton.trailingAnchor],
+        [self.dragPad.heightAnchor constraintEqualToConstant:52.0 * [Theme scale]]
     ]];
 }
 
@@ -335,6 +390,54 @@
     }
     // 跨 App 视图已在 SpringBoard 进程内创建（remoteBubbleView），不需要再显示本进程浮窗。
     [self setStatus:@"状态：跨 App 悬浮已提交到 SpringBoard\n切到任意 App 核对；syslog 看 SpringBoard[pid] 窗口打印"];
+
+    // step26: 参考 AX 的 BKSHIDEventRegisterEventCallback 全局触摸链，
+    // 在本进程注册 HID 回调拿全局坐标，命中红球后通过已验证的 NSInvocation setFrame 路径移动。
+    AXHIDTouchManager *hid = [AXHIDTouchManager sharedManager];
+    [hid startWithCenterProvider:^CGPoint(void) {
+        return [[CrossAppOverlayController sharedController] currentOverlayCenter];
+    } moveHandler:^(CGPoint point) {
+        NSError *moveError = nil;
+        [[CrossAppOverlayController sharedController] moveOverlayToPoint:point error:&moveError];
+        if (moveError) {
+            NSLog(@"[AXHID] move failed: %@", moveError.localizedDescription);
+        }
+    } tapHandler:^{
+        NSLog(@"[AXHID] tap ball");
+    }];
+
+    // step19 测试钩子：AXDRAG=1 时延迟模拟一次拖动，验证 kcall moveOverlayToPoint 生效。
+    const char *dragEnv = getenv("AXDRAG");
+    if (dragEnv != NULL && strcmp(dragEnv, "1") == 0) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            NSError *moveError = nil;
+            CGPoint target = CGPointMake(90.0, 720.0);
+            BOOL moved = [[CrossAppOverlayController sharedController] moveOverlayToPoint:target
+                                                                                   error:&moveError];
+            [self setStatus:[NSString stringWithFormat:@"状态：拖动测试 %@\n目标 (%.0f, %.0f) %@",
+                             moved ? @"OK" : @"FAIL", target.x, target.y,
+                             moveError.localizedDescription ?: @""]];
+        });
+    }
+}
+
+// step19: 拖动垫 pan → kcall 实时移动 SpringBoard 悬浮球。
+// 球的 frame 更新在 SpringBoard 主线程执行；这里只传目标圆心坐标。
+- (void)handleDragPad:(UIPanGestureRecognizer *)gesture {
+    CrossAppOverlayController *controller = [CrossAppOverlayController sharedController];
+    CGPoint translation = [gesture translationInView:self.view];
+    CGPoint center = [controller currentOverlayCenter];
+    center.x += translation.x;
+    center.y += translation.y;
+    [gesture setTranslation:CGPointZero inView:self.view];
+
+    NSError *error = nil;
+    BOOL ok = [controller moveOverlayToPoint:center error:&error];
+    if (gesture.state == UIGestureRecognizerStateEnded) {
+        [self setStatus:[NSString stringWithFormat:@"状态：跨 App 球已移动到 (%.0f, %.0f)\n%@",
+                         center.x, center.y, ok ? @"位置更新成功" : (error.localizedDescription ?: @"更新失败")]];
+    }
 }
 
 @end
