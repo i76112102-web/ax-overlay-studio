@@ -6,6 +6,13 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <math.h>
 
+@interface AXHIDTouchManager ()
+@property (nonatomic, copy) CGPoint (^centerProvider)(void);
+@property (nonatomic, copy) void (^moveHandler)(CGPoint);
+@property (nonatomic, copy) void (^tapHandler)(void);
+@property (nonatomic, readwrite) BOOL running;
+@end
+
 typedef void (*AXHIDRegisterFn)(void *callback);
 typedef CGPoint (*AXHIDGetPointFn)(void *event, void *path);
 typedef int (*AXIOHIDGetTypeFn)(void *event);
@@ -118,13 +125,6 @@ static void axhid_callback(void *a0, void *a1, void *a2, void *a3, void *a4, voi
         }
     }
 }
-
-@interface AXHIDTouchManager ()
-@property (nonatomic, copy) CGPoint (^centerProvider)(void);
-@property (nonatomic, copy) void (^moveHandler)(CGPoint);
-@property (nonatomic, copy) void (^tapHandler)(void);
-@property (nonatomic, readwrite) BOOL running;
-@end
 
 @implementation AXHIDTouchManager
 
